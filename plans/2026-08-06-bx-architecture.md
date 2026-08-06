@@ -42,12 +42,21 @@ verifying bugs. Root causes:
   locators auto-wait; no screenshot-guess-retry.
 - Console/network: ring buffer, errors surfaced by default, pattern filter.
 
-**Profiles:** named personas → persistent user-data-dirs under
-`~/.bx/profiles/<name>` (`bx --profile work`). One-time sign-in per persona;
-cookies persist. NOTE: Chrome 136+ blocks `--remote-debugging-port` on the
-default user-data-dir, and app-bound cookie encryption (Chrome 127+, Windows)
-blocks cookie import — so we can't CDP-attach to the literal daily-driver
-profiles. Managed dirs with real Chrome binary is the honest path.
+**Two backends, one verb surface:**
+
+- **Managed (v1, default):** Playwright + real Chrome binary
+  (`channel: 'chrome'`), persistent user-data-dirs under `~/.bx/profiles/<name>`
+  (`bx --profile work`). One-time sign-in per persona. Headless-able, CI-able.
+  (Chrome 136+ blocks `--remote-debugging-port` on the default user-data-dir
+  and app-bound cookie encryption blocks cookie import — hence managed dirs.)
+- **Bridge (v2):** self-hosted companion extension sideloaded into the real
+  daily-driver profiles, built on **playwright-crx** (Playwright compiled to
+  run inside an extension via `chrome.debugger`). Each profile's extension
+  connects out to bx's local daemon over WebSocket and registers under a
+  profile name → `bx --chrome work` targets that connection. Full Playwright
+  locator/auto-wait semantics inside the real logged-in profile. Caveats:
+  `chrome.debugger` yellow banner, MV3 service-worker keepalive (held by the
+  socket), no headless/CI, dialogs still block.
 
 **Flows:** `flows/<name>.flow.ts` — tiny typed API, checked by tsc. Replay =
 zero model tokens.
@@ -63,25 +72,27 @@ zero model tokens.
 **`bx agent "<NL>"`:** compiles instruction → flow via headless cheap model,
 executes, emits ~300-token JSON report (pass/fail, console errors, keyframes).
 
-**Recording:** Playwright video/trace → user's video-to-keyframes tool (being
-built separately, external CLI) → 3–5 stills instead of live screenshot
-narration. GIF/frames as byproduct.
+**Recording:** Playwright video (webm) → `dested/video-to-prompt`
+(`bun add github:dested/video-to-prompt`) → agent-ready package: deduped
+keyframes, 3×3 contact sheets, `report.md` built for LLM reading. The library
+is **browser-only** (decodes via `<video>`/canvas/OfflineAudioContext) — bx
+runs `distill()` inside an internal harness page in the browser it already
+controls, and writes the package to `recordings/<slug>/` via exposed bindings.
+`report.md` is the tier-2 evidence artifact. For bx-driven recordings there is
+no narration — instead bx feeds its own **action log as the transcript
+segments** (timed "clicked Save", "filled email"), so the report reads as a
+narrated walkthrough with zero audio.
 
 **React-specific:** mount component/route directly for screenshots; `bx watch`
 re-runs flow + snap on Vite HMR.
 
 ## Decisions so far
 
-- Standalone repo/global CLI, reused across projects (dested/claude-browser).
-- Real Chrome binary, managed persistent profiles, profile picker flag.
-- Flows in typed TS (not YAML).
-- CLI + teaching skill, not MCP server.
-- Model tiers: Haiku default driver, Sonnet escalation, main model verdicts —
-  all via Claude Code headless (subscription).
+Moved to `decisions.md` at repo root.
 
 ## Open
 
 - Final CLI name (`bx` is working name).
-- Persistent-session driver mechanism: `claude -p` stream-json vs Agent SDK.
-- Keyframe extractor interface (user building it now).
 - Repo visibility (created private; flip when ready).
+- Bridge extension: exact keepalive strategy for MV3 worker; install story
+  across 5 profiles.
