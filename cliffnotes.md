@@ -32,7 +32,7 @@ src/
   bench/bench.ts     bun run bench [--agent] → bench-results.json
 fixtures/app/        "TaskBox" test app served by the daemon at /fixture
 flows/examples/      canonical user-facing flow examples
-skill/SKILL.md       the Claude Code skill (copy to ~/.claude/skills/bx)
+skill/SKILL.md       the Claude Code skill (installed via `bx install-skill`)
 scripts/build-harness.ts  Bun.build bundle of harness.ts (+ self-heals dep dist)
 tests/smoke.test.ts  live daemon suite (bun test), profile "bxtest"
 tests/flows.test.ts  synthesis + bx/flow-alias unit tests (no browser)
@@ -103,5 +103,8 @@ Dockerfile, drydock.yaml, .github/  DRYDOCK-MANAGED (portal regenerates — don'
   governance, --url/--enter/--win entry+win recipe), recording+distill,
   bench, skill, bx.dested.com. Real-time-game driving live-proven (SceneBeans
   Round 4 win $0.16; fixture-game agent win on Haiku $0.037).
+- npm: publishes as `bx-browser` (bin `bx`); `bx install-skill` copies
+  skill/SKILL.md to ~/.claude/skills/bx. Site build snapshots the skill via
+  site/scripts/gen-skill.ts → src/data/skill-source.ts (SkillModal shows it).
 - v2 planned: playwright-crx bridge extension for daily-driver Chrome profiles
   (see decisions.md) and `bx watch`.

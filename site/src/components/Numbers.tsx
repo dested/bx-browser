@@ -1,116 +1,161 @@
 import type { ReactNode } from "react";
 import { C } from "./Code";
 
-type Stat = {
-  value: string;
-  unit?: string;
-  label: string;
-  detail: ReactNode;
-  compare?: { value: string; label: string };
-  /** Fills the row when the card count is odd, so no half-row is left empty. */
-  full?: boolean;
+type Bar = {
+  name: string;
+  value: number;
+  display: string;
+  tone: "acid" | "flare" | "fog";
+  tag?: { text: string; tone: "acid" | "flare" };
 };
 
-const STATS: Stat[] = [
+type Chart = {
+  title: string;
+  unit: string;
+  bars: Bar[];
+  note: ReactNode;
+};
+
+/**
+ * All values are real captured output (bench + race transcripts in the repo).
+ * Bars are true-to-scale within a chart; a 3px floor keeps slivers visible.
+ */
+const CHARTS: Chart[] = [
   {
-    value: "42",
-    unit: "tokens",
-    label: "One observation",
-    detail: (
-      <>
-        <C>bx els</C> — the numbered element list the model actually acts on.
-      </>
-    ),
-    compare: { value: "1,620", label: "one screenshot · 2,564 raw DOM dump" },
+    title: "Same task, one clock",
+    unit: "seconds to a verified result",
+    bars: [
+      {
+        name: "Claude in Chrome",
+        value: 193.5,
+        display: "3.2 min",
+        tone: "flare",
+        tag: { text: "FAILED", tone: "flare" },
+      },
+      {
+        name: "bx agent",
+        value: 29.2,
+        display: "25.9s",
+        tone: "acid",
+        tag: { text: "PASS", tone: "acid" },
+      },
+    ],
+    note: "Log in and toggle a setting — the race above, unedited. The extension spent 3.2 minutes and never landed the navigation.",
   },
   {
-    value: "$0.037",
-    label: "A delegated task",
-    detail:
-      "Haiku drives end to end. Across seven real tasks on a production app: $0.025–$0.061, 12–75s, 7/7 correct.",
-  },
-  {
-    value: "1.2s",
-    unit: "· 0 tokens",
-    label: "A saved flow, replayed",
-    detail: (
+    title: "One look at the page",
+    unit: "tokens per observation",
+    bars: [
+      { name: "read_page dump", value: 2564, display: "2,564", tone: "fog" },
+      { name: "screenshot", value: 1620, display: "1,620", tone: "flare" },
+      { name: "bx els", value: 42, display: "42", tone: "acid" },
+    ],
+    note: (
       <>
-        Typed TypeScript, checked by <C>tsc</C>, in version control. Re-running
-        costs no model at all.
+        <C>bx els</C> is the numbered element list the model acts on — budgeted
+        at the source, so a look at the page is never a context event.
       </>
     ),
   },
   {
-    value: "730ms",
-    label: "Cold start",
-    detail: (
-      <>
-        Daemon up and Chrome attached. An <C>els</C> scan is 2.3ms, a click 187ms
-        after that.
-      </>
-    ),
-  },
-  {
-    value: "$0.16",
-    label: "A real-time canvas game, won",
-    detail: (
-      <>
-        An agent-authored in-page controller, accepted only against a
-        deterministic win signal — <C>runner.status === "won"</C>. 72 turns, 134s,
-        nothing on screen to click.
-      </>
-    ),
-    full: true,
+    title: "What your session absorbs",
+    unit: "tokens into your main context, same task",
+    bars: [
+      {
+        name: "Claude in Chrome",
+        value: 8000,
+        display: "~8,000",
+        tone: "flare",
+      },
+      { name: "bx report", value: 300, display: "~300", tone: "acid" },
+    ],
+    note: "Every screenshot and retry the extension takes lands in your context and stays there. bx hands back a verdict; the drive stays on Haiku.",
   },
 ];
 
+const BAR_TONE: Record<Bar["tone"], string> = {
+  acid: "bg-acid",
+  flare: "bg-flare/80",
+  fog: "bg-fog-dim",
+};
+
+const TAG_TONE = {
+  acid: "border-acid/50 bg-acid/10 text-acid",
+  flare: "border-flare/50 bg-flare/10 text-flare",
+};
+
 const FACTS = [
-  "4× more interactive elements surfaced than the extension's tools",
-  "~18× more page text per read",
-  "5 agents driving one browser concurrently",
-];
+  ["730ms", "cold start — daemon up, Chrome attached"],
+  ["1.2s · 0 tokens", "a saved flow, replayed"],
+  ["4×", "more interactive elements surfaced than the extension's tools"],
+  ["~18×", "more page text per read"],
+  ["5", "agents driving one browser concurrently"],
+] as const;
+
+function BarRow({ bar, max }: { bar: Bar; max: number }) {
+  const pct = (bar.value / max) * 100;
+  return (
+    <div className="mt-4 first:mt-0">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+        <span className="text-[13px] text-fog">{bar.name}</span>
+        <span className="flex items-center gap-2">
+          {bar.tag && (
+            <span
+              className={`rounded border px-1.5 py-px font-mono text-[10px] font-semibold tracking-wider ${TAG_TONE[bar.tag.tone]}`}
+            >
+              {bar.tag.text}
+            </span>
+          )}
+          <span className="font-mono text-[13px] text-chalk tabular-nums">
+            {bar.display}
+          </span>
+        </span>
+      </div>
+      <div className="mt-1.5 h-3 w-full rounded-r bg-line/40" title={`${bar.name}: ${bar.display}`}>
+        <div
+          className={`h-full rounded-r ${BAR_TONE[bar.tone]}`}
+          style={{ width: `max(${pct}%, 3px)` }}
+        />
+      </div>
+    </div>
+  );
+}
 
 export function Numbers() {
   return (
     <div>
-      <div className="grid gap-px overflow-hidden rounded-lg border border-line bg-line sm:grid-cols-2">
-        {STATS.map((stat) => (
-          <div
-            key={stat.label}
-            className={`bg-panel p-6 md:p-7 ${stat.full ? "sm:col-span-2" : ""}`}
-          >
-            <p className="font-mono text-[11px] tracking-[0.16em] text-fog-dim uppercase">
-              {stat.label}
-            </p>
-            <p className="mt-3 flex flex-wrap items-baseline gap-2">
-              <span className="font-mono text-4xl font-semibold tracking-tight text-acid tabular-nums md:text-5xl">
-                {stat.value}
-              </span>
-              {stat.unit && (
-                <span className="font-mono text-sm text-fog">{stat.unit}</span>
-              )}
-            </p>
-            {stat.compare && (
-              <p className="mt-2 font-mono text-sm text-fog">
-                vs{" "}
-                <span className="text-flare line-through decoration-flare/40">
-                  {stat.compare.value}
-                </span>{" "}
-                <span className="text-fog-dim">{stat.compare.label}</span>
+      <div className="grid gap-4 lg:grid-cols-3">
+        {CHARTS.map((chart) => {
+          const max = Math.max(...chart.bars.map((b) => b.value));
+          return (
+            <div key={chart.title} className="rounded-lg border border-line bg-panel p-6">
+              <h3 className="text-base font-semibold text-chalk">{chart.title}</h3>
+              <p className="mt-1 font-mono text-[11px] tracking-[0.14em] text-fog-dim uppercase">
+                {chart.unit}
               </p>
-            )}
-            <p className="mt-4 text-sm leading-relaxed text-fog">{stat.detail}</p>
-          </div>
-        ))}
+              <div className="mt-5">
+                {chart.bars.map((bar) => (
+                  <BarRow key={bar.name} bar={bar} max={max} />
+                ))}
+              </div>
+              <p className="mt-5 text-[13px] leading-relaxed text-fog">{chart.note}</p>
+            </div>
+          );
+        })}
       </div>
 
-      <ul className="mt-6 grid gap-2 sm:grid-cols-3">
-        {FACTS.map((fact) => (
+      <ul className="mt-6 grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+        {FACTS.map(([value, label]) => (
           <li
-            key={fact}
-            className="rounded-md border border-line-soft px-4 py-3 text-[13px] leading-snug text-fog-dim"
+            key={label}
+            className="rounded-md border border-line-soft px-4 py-3"
           >
-            {fact}
+            <span className="block font-mono text-lg font-semibold text-acid tabular-nums">
+              {value}
+            </span>
+            <span className="mt-1 block text-[12px] leading-snug text-fog-dim">
+              {label}
+            </span>
           </li>
         ))}
       </ul>

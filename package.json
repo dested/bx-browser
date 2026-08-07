@@ -1,11 +1,19 @@
 {
-  "name": "bx",
+  "name": "bx-browser",
   "version": "0.1.0",
   "description": "Purpose-built browser automation for Claude Code: token-budgeted observation, deterministic replayable flows, cheap-model driving.",
   "type": "module",
+  "license": "MIT",
+  "homepage": "https://bx.dested.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dested/claude-browser.git"
+  },
+  "keywords": ["claude-code", "browser-automation", "playwright", "agent", "cli"],
   "bin": {
     "bx": "./src/cli.ts"
   },
+  "files": ["src", "skill", "fixtures", "scripts", "README.md"],
   "exports": {
     ".": "./src/protocol.ts",
     "./flow": "./src/flows/api.ts"

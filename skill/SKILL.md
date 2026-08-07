@@ -211,5 +211,5 @@ Produces `recordings/<slug>/`: deduped keyframes, 3×3 contact sheets, and a
   exposed handles, a vision agent sees pixels and bx does not — hand-drive by
   coordinates or instrument the app.
 
-Install: copy this folder to `~/.claude/skills/bx/`; `bun link` in the repo
-puts `bx` on PATH.
+Install: `bun add -g bx-browser && bx install-skill` (from a checkout:
+`bun link`, then `bx install-skill`).

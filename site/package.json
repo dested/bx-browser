@@ -4,8 +4,8 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "portless run vite",
-    "build": "tsc -p tsconfig.json --noEmit && vite build",
+    "dev": "bun scripts/gen-skill.ts && portless run vite",
+    "build": "bun scripts/gen-skill.ts && tsc -p tsconfig.json --noEmit && vite build",
     "preview": "vite preview"
   },
   "dependencies": {

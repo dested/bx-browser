@@ -34,10 +34,28 @@ coordinates or instrument the app.
 ## Install
 
 ```bash
+bun add -g bx-browser   # puts `bx` on your PATH
+bx install-skill        # copies the skill to ~/.claude/skills/bx
+```
+
+Same two lines on macOS, Linux, and Windows. The skill is what makes it
+automatic: Claude Code reaches for bx on its own whenever a browser task shows
+up — after installing, just say "use bx to verify your changes".
+
+`bx agent` runs through the Agent SDK with the same auth Claude Code itself
+uses — on a Max subscription that means no API key and no separate bill. Note:
+if `ANTHROPIC_API_KEY` is set in your environment, the Agent SDK bills the API
+instead; that is Claude Code's auth-resolution order, not something bx
+controls. Unset it to stay on the subscription.
+
+From a checkout instead:
+
+```bash
 git clone https://github.com/dested/claude-browser
 cd claude-browser
 bun install
 bun link          # puts `bx` on your PATH
+bx install-skill
 ```
 
 Requires Google Chrome installed (bx drives the real binary, not a bundled

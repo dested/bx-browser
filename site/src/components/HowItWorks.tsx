@@ -1,6 +1,5 @@
 import type { ReactNode } from "react";
 import { C } from "./Code";
-import { REPO_URL } from "../lib/constants";
 
 const COLUMNS: { n: string; title: string; body: ReactNode }[] = [
   {
@@ -44,16 +43,15 @@ const COLUMNS: { n: string; title: string; body: ReactNode }[] = [
 
 const EXTRAS: { label: string; title: string; body: ReactNode }[] = [
   {
-    label: "agent mode",
-    title: "The cheap model does the clicking",
+    label: "real-time mode",
+    title: "For 60fps canvases, the model ships code into the page",
     body: (
       <>
-        <C>bx agent</C> takes a natural-language task, runs it on Haiku through
-        the same verbs, and escalates once to Sonnet if the first attempt fails.
-        What comes back to your main session is a ~300-token report — pass/fail, a
-        summary, evidence lines, turns and usage — not a transcript. Add{" "}
-        <C>--save</C> and the actions taken are synthesized into a flow file with
-        replay-stable targets.
+        A read→decide→click loop is seconds per decision; a game runs at 60fps.
+        So <C>bx drive</C> installs an agent-authored controller that runs
+        inside the page every frame, while the daemon polls a win condition —
+        zero model tokens while it plays. Games, drag physics, anything the DOM
+        can't describe.
       </>
     ),
   },
@@ -97,26 +95,6 @@ export function HowItWorks() {
         ))}
       </div>
 
-      <div className="mt-4 rounded-lg border border-line bg-panel p-6 md:p-7">
-        <p className="font-mono text-[11px] tracking-[0.16em] text-fog-dim uppercase">
-          the whole prompt surface
-        </p>
-        <h3 className="mt-3 text-base font-semibold text-chalk">
-          The model learns all of this from one file
-        </h3>
-        <p className="mt-3 max-w-4xl text-sm leading-relaxed text-fog">
-          Everything above is taught by a single ~130-line skill file —{" "}
-          <a
-            href={`${REPO_URL}/blob/main/skill/SKILL.md`}
-            className="font-mono text-[0.92em] whitespace-nowrap text-acid underline decoration-acid/30 underline-offset-2 hover:decoration-acid"
-          >
-            skill/SKILL.md
-          </a>{" "}
-          — and it is loaded only when a browser task actually shows up. Compare
-          that to ~24 MCP tool schemas sitting resident in every context you ever
-          open, whether or not the browser is ever touched.
-        </p>
-      </div>
     </div>
   );
 }

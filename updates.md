@@ -1,5 +1,25 @@
 # Updates
 
+## 2026-08-07 — npm publish prep (bx-browser), bx install-skill, site v2 per walkthrough
+Package renamed bx-browser for npm (bin stays bx; bx/flow alias kept via
+tsconfig paths; LICENSE added; files whitelist verified via pack --dry-run).
+New `bx install-skill` verb copies skill to ~/.claude/skills/bx cross-platform.
+Site reworked per handback walkthrough 3fe4505e: two-line install with OS
+toggle, "runs on your Claude Code subscription" callout, SKILL.md modal
+(gen-skill.ts snapshot), Race moved up + wide, Numbers → time-framed with 3
+bar charts, Terminal/Artifacts/AgentMode merged into Delegation (scrollable
+transcript, what-a-flow-is, $-less table), GameWin removed (drive mode kept as
+HowItWorks card), Honesty softened. Build green, verified in bx.
+Touched: package.json, tsconfig.json, src/cli.ts, skill/SKILL.md, README.md, LICENSE, site/*
+
+## 2026-08-07 — Site: problem-first reframe + Claude Code install/usage section
+Reordered the narrative (problem hero → how-you-use-it → how-it-works → features
+→ side-by-side); new ClaudeCode section shows skill install (cp -r skill
+~/.claude/skills/bx, now also in the hero snippet) and four "you say → Claude
+Code runs" prompt cards; moved the skill-file card out of HowItWorks; meta
+description updated. tsc + build green, verified in bx.
+Touched: site/src/App.tsx, site/src/components/{Hero,ClaudeCode,HowItWorks}.tsx, site/index.html
+
 ## 2026-08-07 — Round 5 verification: shipped game-driving surface all works
 Re-tested the shipped --url/--enter/--win, bx drive, estimator rebase, and
 tab-scoped evidence against SceneBeans. All green. Bee Dodge via --enter/--win:

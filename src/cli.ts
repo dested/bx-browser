@@ -2,7 +2,10 @@
 // bx — browser automation for Claude Code. Hand-rolled argv parsing: the whole
 // point is a tiny, predictable surface with no dependency weight.
 
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   CliError,
   cmd,
@@ -111,6 +114,10 @@ Flows and automation
                                    entry discovery on canvas apps); --win <expr>
                                    is the success predicate — verified before a
                                    pass is accepted
+
+Setup
+  install-skill                    copy the bx skill into ~/.claude/skills/bx so
+                                   Claude Code reaches for bx on its own
 
 Daemon
   profiles                         list profiles and which are running
@@ -805,6 +812,25 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
         out(renderReport(report));
       }
       return report.status === "pass" ? 0 : 1;
+    }
+
+    case "install-skill": {
+      const pkgRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+      const source = path.join(pkgRoot, "skill", "SKILL.md");
+      if (!fs.existsSync(source)) {
+        throw new CliError(3, `skill file not found at ${source}`);
+      }
+      const destDir = path.join(os.homedir(), ".claude", "skills", "bx");
+      fs.mkdirSync(destDir, { recursive: true });
+      const dest = path.join(destDir, "SKILL.md");
+      fs.copyFileSync(source, dest);
+      if (g.json) {
+        printJson({ installed: dest });
+      } else {
+        out(`✓ installed skill to ${dest}`);
+        out(`Claude Code will now reach for bx on browser tasks — try: "use bx to verify your changes"`);
+      }
+      return 0;
     }
 
     case "status": {

@@ -9,7 +9,8 @@ const ITEMS: { title: string; body: ReactNode }[] = [
         bx drives its own profiles under <C>~/.bx/profiles</C>. Chrome 136+ blocks
         CDP on the default user-data-dir and app-bound encryption blocks importing
         cookies, so the browser you already have open, with all its sessions,
-        stays out of reach. The extension lives inside it.
+        stays out of reach. The extension lives inside it. (A bridge extension
+        into your daily Chrome is the v2 roadmap.)
       </>
     ),
   },
@@ -27,8 +28,8 @@ const ITEMS: { title: string; body: ReactNode }[] = [
     title: "Arbitrary third-party sites",
     body: (
       <>
-        bx is built for driving apps you own, where testids and stable accessible
-        names exist and a flow file is worth keeping. For one-off poking at a site
+        bx is built for driving apps you're actually working on — a dev server,
+        a real project, a flow file worth keeping. For one-off poking at a site
         you have never seen, the screenshot loop needs no setup and no profile.
       </>
     ),

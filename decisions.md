@@ -2,6 +2,21 @@
 
 Newest first. Append-only; supersede, never delete.
 
+## 2026-08-07 — npm package name is `bx-browser`; the bin and brand stay `bx`
+
+**Why:** `bx` is squatted on npm. `bx-browser` keeps the brand first
+(`bun add -g bx-browser`, `bunx bx-browser`) and the bin map still installs a
+`bx` executable, so nothing user-facing changes. The `bx/flow` import alias in
+flow files survives the rename via a tsconfig `paths` mapping (the runtime
+alias was always the runner's onLoad rewrite, never package self-reference).
+Skill installation is a first-class CLI verb — `bx install-skill` copies the
+packaged skill to `~/.claude/skills/bx` cross-platform — because the two-line
+install (`bun add -g bx-browser && bx install-skill`) is identical on macOS,
+Linux, and Windows, and the website leans on that.
+**Rejected:** `claude-bx` (trademark-adjacent), `browx`/`usebx` (renames the
+brand), an npm postinstall hook for the skill (silent writes into ~/.claude
+are hostile; an explicit verb is one command and auditable).
+
 ## 2026-08-07 — Real-time games are driven by in-page controllers, not model turns
 
 **Why:** Round 4 proved a turn-based agent structurally cannot win a 60fps
