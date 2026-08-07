@@ -321,13 +321,21 @@ export interface ActionLogResult { entries: ActionLogEntry[]; nextIndex: number 
 // Agent driver (src/agent/driver.ts) public surface — used by the CLI.
 // ---------------------------------------------------------------------------
 
-export type AgentModel = "haiku" | "sonnet";
+export type AgentModel = "haiku" | "sonnet" | "opus";
 
 export interface AgentRunOptions {
   instruction: string;
   profile: string;
   model: AgentModel; // starting tier; may escalate haiku → sonnet once
   save?: string; // flow name: synthesize flows/<save>.flow.ts on success
+  /** per-attempt turn budget; default 40. CLI: --max-turns. */
+  maxTurns?: number;
+  /** stream each tool call/result to stderr as it happens. CLI: --verbose. */
+  verbose?: boolean;
+  /** allow a FINAL escalation sonnet → Opus 4.8. Opt-in only (CLI: --opus);
+   * for complex flows — ~5× Sonnet cost. Never escalates past the tier the
+   * user started at: --model opus runs Opus directly with no chain. */
+  escalateOpus?: boolean;
 }
 
 export interface AgentUsage {
@@ -347,6 +355,8 @@ export interface AgentReport {
   wallMs: number;
   usage: AgentUsage; // summed across tiers
   savedFlow?: string; // path of synthesized flow file
+  /** full turn-by-turn transcript, always written: ~/.bx/agent-runs/<ts>.jsonl */
+  transcriptPath?: string;
 }
 
 // ---------------------------------------------------------------------------

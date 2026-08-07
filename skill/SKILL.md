@@ -24,8 +24,16 @@ bx agent "log in as demo@acme.test and verify the invoice list loads" --save inv
 - Runs on **Haiku** (one-shot Sonnet escalation on failure) and returns a
   ~300-token pass/fail report with evidence. Ends with a trailer —
   `tier=haiku turns=14 wall=25.9s cost=$0.037` — quote it when reporting.
-- Typical real-app task: 10–40 turns, 15–75s, $0.02–0.06. Measured 7/7 correct
-  on a production app.
+- `--opus` allows one FINAL escalation Sonnet → Opus 4.8. Complex flows only
+  (long multi-page journeys, gnarly canvas work) — ~5× Sonnet cost. Don't pass
+  it by default; add it when a Sonnet attempt already failed on a task that
+  genuinely needs the extra reasoning. `--model opus` runs Opus directly.
+- Typical real-app DOM task: 10–40 turns, 15–75s, $0.02–0.06. Measured 7/7
+  correct on a production app. Canvas tasks run longer — raise the budget with
+  `--max-turns 60` for multi-step game work.
+- Every run writes a full turn-by-turn transcript to `~/.bx/agent-runs/` (path
+  in the trailer); `--verbose` streams it live to stderr. A failed run's report
+  says where it got stuck — read it before re-running.
 - **Fan out freely.** Every agent run is pinned to its own browser tab with its
   own element refs — concurrent agents cannot interfere with each other or with
   your own bx commands (which use the active tab). Tested 5-wide; launch
@@ -67,6 +75,7 @@ text — in that order.
 | snap | `bx snap [path] [--full]` | downscaled PNG path — `Read` it only if needed |
 | tabs | `bx tabs` / `bx tab <n>` / `bx tab new [url]` / `bx tab close` | |
 | run | `bx run <flow.ts> [--record]` | replay a flow; zero model tokens |
+| agent | `bx agent "<task>" [--model haiku\|sonnet\|opus] [--opus] [--save <n>] [--max-turns <n>] [--verbose]` | delegate |
 | record | `bx record start <slug>` / `bx record stop` | video → narrated package |
 | admin | `bx status` / `bx profiles` / `bx stop` | daemon lifecycle |
 

@@ -116,7 +116,13 @@ bx agent "reproduce the toggle bug on the settings page" --model sonnet
 
 A headless Claude Agent SDK session drives bx's verbs on Haiku by default. On
 the first failure it escalates once to Sonnet, which is better at repair and
-indirection; the tier that produced the result is reported. What comes back is a
+indirection; the tier that produced the result is reported. With `--opus` a
+failed Sonnet attempt escalates one final time to **Opus 4.8** — opt-in only,
+for complex flows (long multi-page journeys, hard canvas work) at ~5× Sonnet
+cost. `--model opus` starts there directly. Every run writes a turn-by-turn
+transcript to `~/.bx/agent-runs/` and a failed run's report says where it got
+stuck; `--verbose` streams the drive live, `--max-turns <n>` raises the
+per-attempt budget (default 40) for long tasks. What comes back is a
 short structured report — pass/fail, one-paragraph summary, evidence lines,
 turns, token usage — not a transcript. With `--save <name>` the actions actually
 taken AND the assertions that passed are synthesized into

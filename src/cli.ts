@@ -87,8 +87,11 @@ Flows and automation
   run <flow.ts> [--record]         replay a typed flow file (zero model tokens)
   record start <slug>              start recording the session
   record stop                      stop and package it under recordings/<slug>/
-  agent "<instruction>" [--model haiku|sonnet] [--save <name>]
-                                   let a cheap model drive; prints a short report
+  agent "<instruction>"            let a cheap model drive; prints a short report
+                                   [--model haiku|sonnet|opus] [--opus]
+                                   [--save <name>] [--max-turns <n>] [--verbose]
+                                   --opus allows one final escalation to Opus 4.8
+                                   — complex flows only, ~5× Sonnet cost
 
 Daemon
   profiles                         list profiles and which are running
@@ -247,10 +250,21 @@ function takeIn(args: string[]): { target: Target | undefined; where: string } {
   return { target: parseTarget(raw), where: ` in ${q(raw)}` };
 }
 
+function takeMaxTurns(args: string[]): number | undefined {
+  const value = takeOption(args, "--max-turns");
+  if (value === undefined) return undefined;
+  const turns = Number(value);
+  if (!Number.isInteger(turns) || turns <= 0) {
+    throw new CliError(2, "--max-turns takes a positive whole number of turns");
+  }
+  return turns;
+}
+
 function agentModel(model: string | undefined): AgentModel {
   if (model === undefined || model === "haiku") return "haiku";
   if (model === "sonnet") return "sonnet";
-  throw new CliError(2, `unknown model "${model}" — use haiku | sonnet`);
+  if (model === "opus") return "opus";
+  throw new CliError(2, `unknown model "${model}" — use haiku | sonnet | opus`);
 }
 
 // ---------------------------------------------------------------------------
@@ -369,6 +383,7 @@ function renderReport(report: AgentReport): string {
       `wall=${(report.wallMs / 1000).toFixed(1)}s tokens=${u.inputTokens}/${u.outputTokens} ` +
       `(${u.cacheReadTokens} cached) cost=$${u.costUsd === null ? "n/a" : u.costUsd.toFixed(4)}`,
   );
+  if (report.transcriptPath !== undefined) lines.push(`  transcript ${report.transcriptPath}`);
   return lines.join("\n");
 }
 
@@ -646,14 +661,26 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
     case "agent": {
       const model = agentModel(takeOption(args, "--model"));
       const save = takeOption(args, "--save");
+      const maxTurns = takeMaxTurns(args);
+      const verbose = takeFlag(args, "--verbose");
+      const escalateOpus = takeFlag(args, "--opus");
       const instruction = args.join(" ").trim();
       if (instruction.length === 0) {
         throw new CliError(
           2,
-          'usage: bx agent "<instruction>" [--model haiku|sonnet] [--save <name>]',
+          'usage: bx agent "<instruction>" [--model haiku|sonnet|opus] [--opus]' +
+            " [--save <name>] [--max-turns <n>] [--verbose]",
         );
       }
-      const options: AgentRunOptions = { instruction, profile: g.profile, model, save };
+      const options: AgentRunOptions = {
+        instruction,
+        profile: g.profile,
+        model,
+        save,
+        maxTurns,
+        verbose,
+        escalateOpus,
+      };
       const { runAgent } = await import("./agent/driver.ts");
       const report = await runAgent(options);
       if (g.json) {
