@@ -76,6 +76,11 @@ export interface SessionOptions {
   headless: boolean;
 }
 
+/** Context options that only recording varies; see `Session.relaunch`. */
+export interface RelaunchOptions {
+  recordVideo?: { dir: string; size: { width: number; height: number } };
+}
+
 export class Session {
   readonly profile: string;
   readonly headless: boolean;
@@ -590,5 +595,73 @@ export class Session {
       entries: this.actions.slice(cmd.sinceIndex ?? 0),
       nextIndex: this.actions.length,
     };
+  }
+
+  // -------------------------------------------------------------------------
+  // Recording support (record.ts)
+  // -------------------------------------------------------------------------
+
+  /** The live context, or null when the browser is not running. */
+  get liveContext(): BrowserContext | null {
+    return this.context;
+  }
+
+  /** The live action log; recording slices it for the transcript. */
+  get actionEntries(): readonly ActionLogEntry[] {
+    return this.actions;
+  }
+
+  /** Wall-clock origin that `ActionLogEntry.t` is measured from. */
+  get logTimeOrigin(): number {
+    return this.buffers.t0;
+  }
+
+  /**
+   * Reopens the browser with different context options, restoring the active
+   * page's URL. Video capture can only be switched on when a context is
+   * created, and the webm is only flushed when it closes — so starting and
+   * stopping a recording both come through here.
+   *
+   * The launch options are repeated rather than shared with ensureContext so
+   * this stays purely additive against concurrent edits to the launch path.
+   */
+  async relaunch(extra?: RelaunchOptions): Promise<void> {
+    const previous = this.context;
+    const urls = previous ? previous.pages().map((page) => page.url()) : [];
+    const activeUrl = urls[this.activeIndex] ?? urls[0];
+
+    this.context = null;
+    if (previous) await previous.close().catch(() => undefined);
+
+    const { chromium } = await import("playwright-core");
+    let context: BrowserContext;
+    try {
+      context = await chromium.launchPersistentContext(this.profileDir, {
+        channel: "chrome",
+        headless: this.headless,
+        viewport: { width: 1280, height: 800 },
+        ...extra,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw { code: "browser_launch_failed", message };
+    }
+
+    this.context = context;
+    for (const page of context.pages()) this.track(page);
+    context.on("page", (page) => {
+      this.track(page);
+      this.activeIndex = Math.max(0, context.pages().length - 1);
+    });
+
+    const page = context.pages()[0] ?? (await context.newPage());
+    if (activeUrl !== undefined && !OPAQUE_SCHEME.test(activeUrl)) {
+      await page
+        .goto(activeUrl, { waitUntil: "domcontentloaded", timeout: 15000 })
+        .catch(() => undefined);
+    }
+    this.activeIndex = 0;
+    // Refs registered against the old context cannot resolve in the new one.
+    this.generation++;
   }
 }

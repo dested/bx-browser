@@ -1,7 +1,7 @@
 # bx — purpose-built browser automation for Claude Code
 
 - **Date:** 2026-08-06
-- **Status:** active
+- **Status:** done
 - **Type:** plan
 - **What:** Architecture and decisions for the Claude-in-Chrome replacement CLI.
 

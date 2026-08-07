@@ -241,9 +241,8 @@ export function renderEls(
     truncated = kept.length < matched.length;
   }
 
-  const rendered = truncated
-    ? `${text}\n(+${matched.length - kept.length} more — use --all or --filter <text>)`
-    : text;
+  const hint = opts.all ? "use --filter <text>" : "use --all or --filter <text>";
+  const rendered = truncated ? `${text}\n(+${matched.length - kept.length} more — ${hint})` : text;
 
   return { els: kept, total: scan.total, truncated, rendered };
 }

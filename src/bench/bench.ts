@@ -11,7 +11,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { cmd, ensureDaemon, stopDaemon } from "../client.ts";
-import { FlowContext, flow } from "../flows/api.ts";
+import { FlowContext } from "../flows/api.ts";
 import type {
   ActionResult,
   AgentReport,
@@ -229,12 +229,6 @@ async function measureFlowReplay(fixtureBase: string): Promise<BenchResults["flo
     await c.click("add-task");
     await c.expectText("replay task");
   };
-
-  // Constructed through flow() so the bench exercises the same declaration a
-  // real flow file uses; the step fn is invoked directly to time replay without
-  // the file-loading path of the runner.
-  const benchFlow = flow("bench-replay", steps);
-  void benchFlow;
 
   const durations: number[] = [];
   let stepCount = 0;

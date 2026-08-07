@@ -2,6 +2,18 @@
 
 Newest first. Append-only; supersede, never delete.
 
+## 2026-08-06 — Action-log transcript is grafted post-distill, not a Transcriber
+
+**Why:** video-to-prompt's `distill()` only invokes a `transcriber` when the
+video has an audio track; Playwright recordings are silent, so a fake
+Transcriber injecting the action log would simply never run. Instead the
+harness runs distill without one, then rewrites `take.meta.transcript` and
+re-derives transcript.txt / recording.json / report.md / MANIFEST.txt via the
+library's exported builders (`buildReport` et al. exist for exactly this).
+**Rejected:** synthesizing a silent audio track to trigger the transcriber
+(wasteful, fragile); patching video-to-prompt (user's repo, and the builder
+exports already cover it).
+
 ## 2026-08-06 — Daemon runs under Node; everything else under Bun
 
 **Why:** Playwright's default CDP pipe transport uses stdio fds 3/4, which Bun

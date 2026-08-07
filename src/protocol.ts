@@ -293,7 +293,9 @@ export interface AgentReport {
 //   GET  /harness.js            → prebuilt bundle
 //   GET  /harness/video         → the webm being distilled
 //   GET  /harness/meta          → { title, segments: [{t, text}] } (action log as transcript)
-//   POST /harness/result        → { files: [{ path, base64 }] } written under the package dir
+//   POST /harness/result        → { path, base64 } one file written under the package dir
+//   POST /harness/done          → harness signals the distill finished
+//   POST /harness/error         → { message } harness signals the distill failed
 // ---------------------------------------------------------------------------
 
 export interface HealthResult { ok: true; profile: string; browserRunning: boolean }

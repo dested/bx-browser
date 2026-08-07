@@ -8,8 +8,15 @@
 // Browser globals only: no node:*/Bun imports may appear here or the bundle
 // will not run in the page.
 
-import { distill } from "video-to-prompt";
-import type { StageProgress, Transcriber, TranscriptSegment } from "video-to-prompt";
+import {
+  buildManifestTxt,
+  buildRecordingJson,
+  buildReport,
+  buildTranscriptTxt,
+  distill,
+  recDirName,
+} from "video-to-prompt";
+import type { StageProgress, TranscriptSegment } from "video-to-prompt";
 
 interface HarnessMeta {
   title: string;
@@ -57,11 +64,13 @@ function progressText(p: StageProgress): string {
 }
 
 async function post(path: string, body?: unknown): Promise<void> {
-  await fetch(path, {
+  const res = await fetch(path, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body ?? {}),
   });
+  // A rejected write would otherwise vanish and the package would ship short.
+  if (!res.ok) throw new Error(`POST ${path} failed: HTTP ${res.status}`);
 }
 
 async function run(): Promise<void> {
@@ -71,20 +80,38 @@ async function run(): Promise<void> {
   const file = new File([blob], `${meta.title}.webm`, { type: "video/webm" });
   log(`video ${(blob.size / 1_000_000).toFixed(1)}MB, ${meta.segments.length} transcript lines`);
 
-  // bx's action log is the narration: the recording has no audio track, so the
-  // "transcriber" ignores the decoded samples and returns the log verbatim.
-  const transcriber: Transcriber | undefined =
-    meta.segments.length > 0 ? { id: "bx-action-log", run: async () => meta.segments } : undefined;
-
   const result = await distill([{ file }], {
     title: meta.title,
-    transcriber,
     onProgress: (p) => log(progressText(p)),
   });
 
+  // The action log is grafted on after the fact rather than passed as a
+  // `transcriber`: distill only calls one when `decodeMono` yields audio, and a
+  // Playwright recording has no audio track — the transcriber would never run.
+  // These four builders are exported for exactly this kind of re-derivation.
+  const rebuilt = new Map<string, string>();
+  if (meta.segments.length > 0) {
+    for (const take of result.takes) {
+      take.meta.transcript = meta.segments;
+      take.meta.transcriber = "bx-action-log";
+    }
+    for (const take of result.takes) {
+      const dir = recDirName(take.index);
+      rebuilt.set(`${dir}/transcript.txt`, buildTranscriptTxt(take.meta));
+      rebuilt.set(`${dir}/recording.json`, buildRecordingJson(result.session, take));
+    }
+    rebuilt.set("report.md", buildReport(result.session, result.takes));
+    rebuilt.set("MANIFEST.txt", buildManifestTxt(result.session, result.takes));
+    log(`grafted ${meta.segments.length} action-log lines into the transcript`);
+  }
+
   log(`writing ${result.files.length} files…`);
   for (const out of result.files) {
-    const bytes = new Uint8Array(await out.blob.arrayBuffer());
+    const replacement = rebuilt.get(out.path);
+    const bytes =
+      replacement === undefined
+        ? new Uint8Array(await out.blob.arrayBuffer())
+        : new TextEncoder().encode(replacement);
     await post("/harness/result", { path: out.path, base64: toBase64(bytes) });
   }
 

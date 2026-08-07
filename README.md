@@ -63,7 +63,7 @@ $ bx els
 [1] link "Dashboard"
 [2] link "Invoices"
 [3] button "New invoice"
-[7] button "Account"
+[4] button "Account"
 
 $ bx expect text "Welcome back"
 ✓ expect text "Welcome back"
