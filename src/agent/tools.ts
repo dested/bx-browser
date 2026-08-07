@@ -19,6 +19,7 @@ import type {
   ConsoleEntry,
   ElsResult,
   ExpectResult,
+  JsResult,
   OpenResult,
   SnapResult,
   TabsResult,
@@ -374,6 +375,18 @@ function buildTools(profile: string, sink: ToolSink, pin: TabPin) {
         const res = await call<TextResult>(profile, { cmd: "text", selector: args.selector, tab });
         if (!res.ok) return say(renderError(res.error));
         return say(res.data.truncated ? `${res.data.text}\n…(truncated)` : res.data.text);
+      },
+    ),
+
+    tool(
+      "bx_js",
+      "Evaluate a JavaScript expression in the page and return its value as JSON. For READING state the app exposes (e.g. window.__game.player) — never for clicking or mutating; use the action tools for that.",
+      { expression: z.string().describe("a single JS expression, e.g. window.__game.targets.length") },
+      async (args) => {
+        const tab = await pin.tab();
+        const res = await call<JsResult>(profile, { cmd: "js", expression: args.expression, tab });
+        if (!res.ok) return say(renderError(res.error));
+        return say(res.data.truncated ? `${res.data.value}\n…(truncated)` : res.data.value);
       },
     ),
 
