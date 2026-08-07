@@ -131,6 +131,95 @@ export function GameWin() {
         </div>
       </div>
 
+      <div className="mt-10">
+        <Label>
+          <span className="text-acid">the controller it wrote</span> — verbatim
+          from the run transcript, whitespace ours
+        </Label>
+        <pre className="bx-scroll overflow-x-auto rounded-lg border border-line bg-panel p-4 font-mono text-[11.5px] leading-[1.7]">
+          <code>
+            <span className="text-chalk">window.__play.override = (r, gi) ={">"} {"{"}</span>
+            {"\n  "}
+            <span className="text-fog">const I = r.getInstances();</span>
+            {"\n  "}
+            <span className="text-fog">
+              const HERO = <span className="text-acid">'def_olf3g1x2'</span>, FLOWERS ={" "}
+              <span className="text-acid">'def_oqkglpag'</span>, BEES ={" "}
+              <span className="text-acid">'def_os8y9zob'</span>;
+            </span>
+            {"\n  "}
+            <span className="text-fog">
+              const h = I.find(i ={">"} i.defId === HERO);
+            </span>
+            {"\n  "}
+            <span className="text-fog">if (!h) return;</span>
+            {"\n  "}
+            <span className="text-fog">
+              const fl = I.filter(i ={">"} i.defId === FLOWERS);
+            </span>
+            {"\n  "}
+            <span className="text-fog">if (!fl.length) return;</span>
+            {"\n\n  "}
+            <span className="text-fog">let b = null, bd = 1e18;</span>
+            <span className="text-fog-dim italic">{"  // nearest flower"}</span>
+            {"\n  "}
+            <span className="text-fog">{"for (const f of fl) {"}</span>
+            {"\n    "}
+            <span className="text-fog">
+              const dx = f.x - h.x, dy = f.y - h.y, d = dx*dx + dy*dy;
+            </span>
+            {"\n    "}
+            <span className="text-fog">{"if (d < bd) { bd = d; b = f; }"}</span>
+            {"\n  "}
+            <span className="text-fog">{"}"}</span>
+            {"\n\n  "}
+            <span className="text-fog">let vx = b.x - h.x, vy = b.y - h.y;</span>
+            <span className="text-fog-dim italic">{"  // seek vector, unit length"}</span>
+            {"\n  "}
+            <span className="text-fog">const L = Math.hypot(vx, vy) || 1;</span>
+            {"\n  "}
+            <span className="text-fog">vx /= L; vy /= L;</span>
+            {"\n\n  "}
+            <span className="text-fog">
+              {"for (const be of I.filter(i => i.defId === BEES)) {"}
+            </span>
+            {"\n    "}
+            <span className="text-fog">
+              const dx = h.x - be.x, dy = h.y - be.y, d = Math.hypot(dx, dy) || 1;
+            </span>
+            {"\n    "}
+            <span className="text-fog">{"if (d < 200) {"}</span>
+            <span className="text-fog-dim italic">
+              {"  // repulsion ramps 0→2.5 inside 200px"}
+            </span>
+            {"\n      "}
+            <span className="text-fog">const w = (200 - d) / 200 * 2.5;</span>
+            {"\n      "}
+            <span className="text-fog">vx += dx/d * w; vy += dy/d * w;</span>
+            {"\n    "}
+            <span className="text-fog">{"}"}</span>
+            {"\n  "}
+            <span className="text-fog">{"}"}</span>
+            {"\n  "}
+            <span className="text-fog">const l = Math.hypot(vx, vy) || 1;</span>
+            {"\n  "}
+            <span className="text-chalk">
+              {"return { joyX: vx/l, joyY: vy/l };"}
+            </span>
+            <span className="text-fog-dim italic">{"  // unit joystick vector"}</span>
+            {"\n"}
+            <span className="text-chalk">{"};"}</span>
+          </code>
+        </pre>
+        <p className="mt-3 text-[13px] leading-relaxed text-fog">
+          Seek the nearest flower, add inverse-distance-weighted repulsion from
+          each bee, renormalize, return as joystick input — steering-behavior
+          gamedev literature, authored mid-run from state the agent had read
+          thirty seconds earlier. The transcript shows it tuning too: one
+          iteration tried a 240px radius with 3.5 weight before settling back.
+        </p>
+      </div>
+
       <pre className="mt-8 rounded-lg border border-line bg-panel p-4 font-mono text-[11.5px] leading-[1.75] whitespace-pre-wrap">
         <code>
           <span className="text-acid">✓ PASS</span>
