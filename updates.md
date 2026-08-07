@@ -1,5 +1,26 @@
 # Updates
 
+## 2026-08-07 — Round 5 verification: shipped game-driving surface all works
+Re-tested the shipped --url/--enter/--win, bx drive, estimator rebase, and
+tab-scoped evidence against SceneBeans. All green. Bee Dodge via --enter/--win:
+PASS Haiku 15 turns $0.06 (entry runs before turn 1, whole budget goes to the
+controller — the R4 entry-discovery sink that made the same task a $0.60 failure
+is gone; --win verified by the driver, est==metered). Balloon Flight agent: PASS
+Haiku 38 turns $0.11 — agent dumped the hook's input shape, found aDown, and
+DISCOVERED it's edge-triggered, pulsing the flap ~every 8 frames to gain altitude
+and reach the flag (closes the R4b structural miss). Picnic Panic via bx drive
+hand-iteration: WON in 2 iterations, ZERO model tokens each — a 5s idle-watch
+found the real hazard is one chasing fox (not the 5 stationary props); iter2
+avoid-only-fox → won 8/8, 2 hearts. bx drive verified end-to-end (install +
+daemon poll + timeout exit1 + in-place replace). Estimator: est==metered on
+completed runs ($0.06/$0.11), est≥metered on ended=budget (includes aborted rung)
+— the ~3x "pessimism" was the metering artifact, now both cost=/est= printed.
+Concurrency: two concurrent fails printed DIFFERENT tails; operator tab survived.
+New doc micro-finding: edge-triggered buttons must be PULSED not held — worth one
+line in game-driving guidance. Round 5 appended to
+plans/2026-08-07-winning-games-and-claude-chrome-parity.md. Flows: r5-beedodge,
+r5-balloon.
+
 ## 2026-08-07 — Round-4 response: bx drive, --enter/--win, estimator truth, evidence scoping
 New `drive` primitive end to end (protocol cmd -> daemon poll loop -> CLI verb
 -> flow api/synthesis -> bx_drive agent tool): installs a JS controller once,

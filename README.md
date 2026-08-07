@@ -182,8 +182,10 @@ bx drive --install "window.__play.override = (r, gi) => { /* seek goal, avoid ha
 
 Re-running `bx drive` replaces the controller in place, so revising a losing
 controller is one command. Mind the input schema — hooks often accept buttons
-(jump/flap/fire) as well as axes. Runs log to the action log and synthesize into
-flows, which turns "level N still winnable" into a zero-token regression test.
+(jump/flap/fire) as well as axes, and buttons may be edge-triggered: if holding
+one has no effect, pulse it every few frames. Runs log to the action log and
+synthesize into flows, which turns "level N still winnable" into a zero-token
+regression test.
 
 ## Recording
 

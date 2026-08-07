@@ -2,7 +2,10 @@
 
 - **Date:** 2026-08-07
 - **Status:** active — implementation asks for the bx maintainer. Round 4b
-  (generalization across three games/genres) added 2026-08-07.
+  (generalization across three games/genres) added 2026-08-07. **Round 5
+  (2026-08-07): the shipped surface — `--enter`/`--win`, `bx drive`, estimator
+  rebase, tab-scoped evidence — is all VERIFIED WORKING; 3 games won on Haiku for
+  ~$0.17 total. See the Round 5 section at the end.**
 - **Type:** capability report + roadmap
 - **Tester:** Claude (Opus) driving the installed `bx` skill against SceneBeans
   (`http://localhost:5183`) — a kids' game-maker whose home, editor, and play are
@@ -222,3 +225,61 @@ controller that can never win.
   gameplay. Ship `--enter`/`--win` (and ideally `bx drive`), fix the estimator and
   the concurrency evidence bug, and document the controller pattern — and
   "drive/verify a game" becomes a reliable, cheap, first-class bx capability.
+
+---
+
+# Round 5 — verification of the shipped surface (2026-08-07)
+
+The bx maintainer shipped every ask from Rounds 4/4b: `--url` / `--enter` / `--win`
+on `bx agent`, the `bx drive` primitive, the estimator rebase, and tab-scoped
+evidence. Re-tested against the same SceneBeans games. **Everything works, and
+the numbers moved exactly the predicted direction.**
+
+| Test | What it proves | Result |
+| --- | --- | --- |
+| Bee Dodge via `--enter`/`--win` | entry-discovery cost sink is gone | **PASS — Haiku, 15 turns, $0.06** (was $0.16 in R4 with the recipe in-prompt, $0.60 fail without) |
+| Balloon Flight agent | the input-schema miss is closed | **PASS — Haiku, 38 turns, $0.11** — agent dumped the hook's input shape, found `aDown`, and **discovered the flap is edge-triggered — pulsed it ~every 8 frames** to gain altitude and reach the flag |
+| Picnic Panic via `bx drive` hand-iteration | zero-token controller tuning loop | **WON in 2 iterations** — iter 1 (avoid the wrong objects) lost; a 5-second `bx js` idle-watch revealed the real hazard is a single **chasing fox**, not the 5 stationary props; iter 2 (avoid only the fox) → `won`, score 8/8, 2 hearts left. **Zero model tokens per iteration.** |
+| Two concurrent failing runs | evidence contamination fixed | **PASS — distinct tails** (`…/` + `closed tab 2` vs `…/beta` + `closed tab 1`); in R3/R4 concurrent runs printed *identical* tails. Operator tab survived (no steal). |
+
+### What each fix bought, confirmed
+- **`--enter` / `--win` — the P0 — works and is the big cost win.** The entry
+  recipe runs before turn 1 (and, verified, re-runs on escalation), so the whole
+  budget goes to the actual task. Bee Dodge dropped to **$0.06 on Haiku** (no
+  escalation) — the entry-discovery sink that turned an identical task into a
+  $0.60 failure in Round 4 is gone. `--win` is genuinely enforced: both passing
+  runs' trailers show "win predicate verified … → true".
+- **`bx drive` works end to end** — install a controller, poll the predicate
+  daemon-side (`✓ satisfied after 13.6s (10 polls)` / `✗ not satisfied after
+  20.2s`), exit 1 on timeout, re-run replaces the controller in place. It made the
+  Picnic Panic tuning loop **one command per iteration at zero model cost** — and
+  incidentally I used it to author the winning Balloon Flight controller by hand
+  in two tries. This is the primitive that has no computer-use equivalent.
+- **Estimator is fixed.** `est` now equals metered `cost` on completed runs
+  ($0.06=$0.06, $0.11=$0.11), and on `ended=budget` runs `est` is the *higher*
+  number because it includes the aborted rung the SDK never bills — exactly as
+  documented. The ~3× "pessimism" from Rounds 3/4 was the metering artifact it
+  was diagnosed to be; printing both `cost=` and `est=` resolves it cleanly.
+- **Evidence is tab-scoped.** Two concurrent failures produced different
+  last-action tails. The contamination that made R3/R4 fail-reports unreliable
+  under concurrency is gone.
+
+### New micro-finding for the docs (edge-triggered buttons)
+Balloon Flight sharpened the Round 4b lesson one more notch: it's not enough to
+know the flap **button** exists — the button is **edge-triggered**, so a
+controller that holds `aDown = true` flaps exactly once and the balloon never
+rises (confirmed: holding it left `heroY` pinned at 732 vs `flagY` 560). The
+winning controller must **pulse** the button (true for a single frame every few
+frames). The agent discovered this from a prompt nudge; worth one line in the
+game-driving guidance: *"buttons may be edge-triggered — if holding one has no
+effect, pulse it."*
+
+### Status: the game-driving capability is real and cheap
+Across Round 5, **three real games won on Haiku** for a combined ~$0.17 of model
+spend (Bee Dodge + Balloon Flight; Picnic Panic cost zero model tokens via
+`bx drive`), each producing a replayable `flows/*.flow.ts` regression. bx now
+does the thing this whole report set out to prove — drive and *win* real-time
+canvas games, deterministically and for pennies — with a primitive
+(`bx drive`) that a screenshot agent structurally cannot match. Remaining items
+are documentation polish (the edge-triggered-button line; a role-inference
+one-liner), not capability gaps.

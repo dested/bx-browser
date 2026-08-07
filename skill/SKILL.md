@@ -148,6 +148,8 @@ bx drive --install "window.__play.override = (r, gi) => { /* seek goal, avoid ha
 
 Mind the input schema: hooks often accept buttons (jump/flap/fire) as well as
 axes — a joystick-only controller cannot win a game whose lift is a button.
+Buttons may also be edge-triggered: if holding one has no effect, pulse it
+every few frames instead.
 `bx drive` logs to the action log and synthesizes into flows: "level N still
 winnable" becomes a zero-token regression test.
 
