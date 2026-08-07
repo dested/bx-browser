@@ -1,7 +1,9 @@
 # SceneBeans canvas / gamedev shakedown — bx agent
 
-- **Date:** 2026-08-06
-- **Status:** active (findings for the maintainer; expect a re-test after fixes)
+- **Date:** 2026-08-06 (Round 1) · 2026-08-07 (Round 2 re-test)
+- **Status:** active — Round 2 done. P0 (debuggability) FIXED & verified. Tasks
+  still 0/3; deeper blockers now visible (see Round 2). Expect Round 3 after
+  the drag-gesture + cost-governance work.
 - **Type:** test report
 - **Tester:** Claude (Opus) driving the installed `bx` skill against SceneBeans
 - **Target app:** SceneBeans Studio (`http://localhost:5183`) — a kids' game-maker.
@@ -152,3 +154,134 @@ Re-run the same three tasks unchanged. Success bar:
 - Dev server: `npm run dev` in the SceneBeans repo → `:5183`. Fresh profile hits
   a one-time onboarding; completing it once (localStorage) lets agent tabs land
   on the trail directly.
+
+---
+
+# Round 2 — re-test after the fixes (2026-08-07)
+
+Re-ran the **same three tasks** against the two fix commits
+(`817bc44` bx_js + canvas guidance; `6f539e9` transcripts / synthesized fail
+reports / informed escalation / Opus tier). This time each prompt was fed the
+real SceneBeans dev handles (`window.__studio/__trail/__editorWorld/__paper`)
+and the canvas selector (`in:"canvas"`), and the harder runs got a bigger
+budget (`--max-turns 50/60`, `--opus` on the build task).
+
+## Verdict: the fixes landed and WORK — but the tasks still fail
+
+**Every P0/P1 item from Round 1 is verifiably fixed.** The reason the tasks
+still fail is now *legible* — Round 1 literally could not see these walls.
+
+| Task | Tier reached | Turns | Wall | Cost | Outcome |
+| --- | --- | --- | --- | --- | --- |
+| 1 Navigate → editor | sonnet (esc.) | 193 | 333s | **$0.72** | fail report + transcript; stuck in trail |
+| 2 Drag thing → play | **opus** (esc.) | 301 | 640s | **$1.65** | fail report + transcript; drag never took |
+| 3 Play → win | sonnet (esc.) | 218 | 374s | **$0.75** | fail report + transcript; never reached play |
+
+### What the fixes bought us (all confirmed from the transcripts)
+- **Debuggability — the P0 — is solved.** No more bare `maxTurns` error. Each
+  run now ends with a synthesized fail report: `ran out of turns (N) without
+  reporting`, the **last 8 actions**, and a **transcript path**
+  (`~/.bx/agent-runs/<ts>.jsonl`). I diagnosed all three failures *from the
+  outside* in minutes. This is the single biggest improvement.
+- **`bx_js` is real and the agent leans on it hard.** The Opus build run called
+  `bx_js` **59×**, including `window.__studio.getState().project.scenes` to read
+  the actual game document, and the nav run **35×**. The agent can now perceive
+  and (attempt to) verify canvas state. Exactly the highest-leverage Round 1 fix.
+- **Canvas acting works.** Transcripts show real coordinate work: decomposed
+  drags (`mouse down 170,738 → move → move → up 645,375`), `bx_key down/up` for
+  held movement, `mouse click` at canvas coords. The model now *reaches for* the
+  canvas verbs — the Round 1 policy gap is closed.
+- **Informed escalation + Opus tier both fire** (haiku → sonnet → opus visible
+  in the transcript `attempt` field).
+
+### The deeper walls Round 1 couldn't see
+
+**A. The walkable-trail home is a hard entry gate (killed tasks 1 & 3).**
+SceneBeans' home is a *walk-the-hero-to-a-node* 3D diorama (the "Trail Wonder"
+overworld). There is **no DOM affordance** — and no obvious canvas affordance —
+to "open game N in the editor." Both runs thrashed here: nav concluded *"the page
+is showing trail completion rather than the editor… let me reload"*; play kept
+clicking *"Go to my island"* and tapping keys without ever entering a game. The
+canvas verbs are necessary but not sufficient: a blind agent can act by
+coordinates, but it can't *find* an unlabeled node on a diorama it can't see.
+(Test confound, noted honestly: my profile was in a fully-completed *"TRAIL
+CHAMPION"* state, which added noise — but a completed trail still opens games by
+node-tap, so the wall stands.)
+
+**B. Synthetic drag doesn't satisfy the shelf's pointer-intent gesture (killed
+task 2).** SceneBeans' `StickerShelf` uses a deliberate pointer contract —
+*cells are `touch-none`; a flat sideways swipe scrolls; only a mostly-vertical
+pull UP hands off to `onDragStart`*. bx's `drag` (Playwright mousedown → moves →
+mouseup) does not appear to trip that heuristic, so the thing never detaches from
+the shelf. Haiku's last reasoning: *"the shelf might be in the canvas itself or
+accessed through different means."* Opus tried a real decomposed drag and still
+couldn't commit it. **This is generalizable:** modern pointer-capture / DnD UIs
+(touch-none + pointer-intent) often won't fire on `mouse.*` events alone.
+
+**C. Cost inverted from "too cheap to matter" to the main risk.** Round 1 was
+$0.24–$0.36/run. Round 2 is **$0.72–$1.65/run** (build alone $1.65, 10.7 min).
+The higher turn caps + the *three-rung* ladder (haiku→sonnet→opus each running
+to exhaustion) multiply the burn. Raising `--max-turns` doesn't help a task the
+agent can't converge on — it just buys a more expensive failure. The real fix is
+convergence + a spend ceiling, not more turns.
+
+**D. Possible tab-isolation wobble under concurrency.** Both escalations began
+with *"Page is blank (tab was closed)"* and every run's action log ends with
+`closed tab 1`. Some of this is expected (the pin opens a fresh tab per attempt;
+`close()` runs in `finally`). But "tab **1**" collides with the operator's own
+active tab, and a *blank tab at escalation start* costs turns re-orienting. Worth
+confirming that 3 concurrent agents + one hand-driven active tab can't stomp each
+other's tab ids.
+
+## Refined recommendations (Round 2)
+
+**Cost governance is now P0 (it replaced debuggability).**
+1. **Hard spend/wall ceiling per `bx agent`** (`--budget $0.25`, `--max-wall
+   120s`) that aborts *and still emits the synthesized fail report*. A single
+   `--opus` build hitting $1.65/10min unattended is a footgun.
+2. **Don't run every rung to exhaustion.** If an attempt makes no measurable
+   progress (no new URL, no state delta) for K turns, stop *that* rung early
+   rather than burning its full budget before escalating. Escalate on
+   *stall-detected*, not only on turn-exhaustion.
+
+**Make the agent competent at canvas *navigation*, not just canvas *acting*.**
+3. The system prompt teaches coordinate acting but not **how to find an
+   unlabeled canvas target**. Add guidance: when a canvas has no affordance and
+   no `bx_js` handle to click, prefer **app-exposed navigation** — call a store
+   action / deep-link via `bx_js` (e.g. `window.__studio.getState().openEditor(id)`
+   style hooks) instead of guessing pixel positions. For dev-testing your own
+   app this is the intended path and dramatically cheaper than blind clicking.
+4. Encourage a **`bx_js` "map" pass** on canvas pages: dump `Object.keys` of the
+   exposed handles up front so the agent learns the vocabulary before acting.
+
+**Fix the drag.**
+5. Give `bx_drag` a **pointer-event mode** (dispatch `pointerdown/move/up` with
+   `pointerId`, small inter-move delays, and enough steps) so it satisfies
+   pointer-intent / touch-none DnD. Expose hold-at-start and per-step delay knobs.
+   Today's mouse-only drag silently no-ops on a large class of modern UIs.
+
+**Skill doc.**
+6. **Push "default to `bx agent`" harder** (owner ask, carried from Round 1 #7):
+   the by-hand section still reads as a co-equal option. Make `bx agent` the
+   strong default for *anything task-shaped*; reserve hand-driving for quick
+   single lookups and ground-truth setup.
+7. **Periodic progress, not just end-of-run** (owner ask): the transcript file
+   exists but a non-`--verbose` background run's **stdout is still silent until
+   the final trailer**. Emit a heartbeat line (turn count / last action / cost so
+   far) to stdout every N turns even without `--verbose`, so an operator watching
+   the output file sees life. `--verbose` streaming to stderr is great; the
+   default run should still show a pulse.
+8. **Document the canvas-navigation caveat**: the agent is now solid at DOM and
+   competent at canvas *acting/verifying via `bx_js`*, but **canvas
+   *wayfinding* on an unlabeled diorama remains unreliable** — such apps need an
+   app-exposed navigation handle to be agent-drivable, and the task prompt should
+   hand the agent that handle.
+
+## Round 3 success bar
+- Task 1 passes when the prompt provides an app-nav handle (proves canvas
+  *wayfinding* via `bx_js` works); document that dependency in the skill.
+- Task 2 either passes with a pointer-mode drag, or the agent *reports* "drag did
+  not register" as a clean fail (it already fails cleanly — pointer-mode is the
+  real win).
+- No run exceeds a set `--budget`; stall-detection ends dead rungs early.
+- Cost per run back under ~$0.30 even with escalation.

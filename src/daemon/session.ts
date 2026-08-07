@@ -49,10 +49,13 @@ interface Resolved {
   stable: string;
 }
 
-/** Viewport point the coordinate verbs offset from; `stable` names the `in`. */
-interface Origin {
+interface Point {
   x: number;
   y: number;
+}
+
+/** Viewport point the coordinate verbs offset from; `stable` names the `in`. */
+interface Origin extends Point {
   stable?: string;
 }
 
@@ -105,6 +108,13 @@ export class Session {
   private readonly snapsDir: string;
   private context: BrowserContext | null = null;
   private activeIndex = 0;
+  /**
+   * Non-zero while a background `tabNew` is creating its page, so the context's
+   * "page" handler leaves activeIndex alone. Without this, an agent opening its
+   * own pinned tab would redirect the operator's unpinned commands into it.
+   * Pages the site itself opens (window.open) still activate.
+   */
+  private suppressActivate = 0;
   private nextPageId = 1;
   private readonly pageIds = new WeakMap<Page, number>();
   private readonly refs = new Map<number, PageRefs>();
@@ -152,11 +162,14 @@ export class Session {
     }
     this.context = context;
     for (const page of context.pages()) this.track(page);
-    context.on("page", (page) => {
-      this.track(page);
-      this.activeIndex = Math.max(0, context.pages().length - 1);
-    });
+    context.on("page", (page) => this.onNewPage(context, page));
     return context;
+  }
+
+  private onNewPage(context: BrowserContext, page: Page): void {
+    this.track(page);
+    if (this.suppressActivate > 0) return;
+    this.activeIndex = Math.max(0, context.pages().length - 1);
   }
 
   private track(page: Page): void {
@@ -649,16 +662,108 @@ export class Session {
   async drag(cmd: CmdOf<"drag">): Promise<ActionResult> {
     return this.runAction(cmd, cmd.tab, async (page) => {
       const origin = await this.resolveOrigin(page, cmd.in);
-      await page.mouse.move(origin.x + cmd.fromX, origin.y + cmd.fromY);
-      await page.mouse.down();
-      await page.mouse.move(origin.x + cmd.toX, origin.y + cmd.toY, { steps: cmd.steps ?? 10 });
-      await page.mouse.up();
+      const from = { x: origin.x + cmd.fromX, y: origin.y + cmd.fromY };
+      const to = { x: origin.x + cmd.toX, y: origin.y + cmd.toY };
+      const pointer = cmd.mode === "pointer";
+      if (pointer) await this.pointerDrag(page, from, to, cmd);
+      else await this.mouseDrag(page, from, to, cmd);
       const where = origin.stable === undefined ? "" : ` in "${origin.stable}"`;
+      const how = pointer ? " (pointer)" : "";
       return {
-        text: `dragged ${cmd.fromX},${cmd.fromY} → ${cmd.toX},${cmd.toY}${where}`,
+        text: `dragged ${cmd.fromX},${cmd.fromY} → ${cmd.toX},${cmd.toY}${where}${how}`,
         stableTarget: origin.stable,
       };
     });
+  }
+
+  /**
+   * Real input events. Without holdMs/stepDelayMs this is one `mouse.move`
+   * with `steps` — the cheapest path and what every existing drag does.
+   */
+  private async mouseDrag(page: Page, from: Point, to: Point, cmd: CmdOf<"drag">): Promise<void> {
+    const steps = cmd.steps ?? 10;
+    const holdMs = cmd.holdMs ?? 0;
+    const stepDelayMs = cmd.stepDelayMs ?? 0;
+    await page.mouse.move(from.x, from.y);
+    await page.mouse.down();
+    if (holdMs > 0) await sleep(holdMs);
+    if (stepDelayMs > 0) {
+      for (let i = 1; i <= steps; i++) {
+        const t = i / steps;
+        await page.mouse.move(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
+        await sleep(stepDelayMs);
+      }
+    } else {
+      await page.mouse.move(to.x, to.y, { steps });
+    }
+    await page.mouse.up();
+  }
+
+  /**
+   * Synthetic PointerEvents for touch-action:none / pointer-intent DnD, which
+   * listens for pointer events only and never sees `page.mouse`. Every move and
+   * the up go to the element that took the pointerdown — that is what
+   * setPointerCapture does for real input, and it is what these UIs assume.
+   * The waits run in-page so the gesture has real timing.
+   */
+  private async pointerDrag(page: Page, from: Point, to: Point, cmd: CmdOf<"drag">): Promise<void> {
+    const found = await page.evaluate(
+      async (input: {
+        from: Point;
+        to: Point;
+        steps: number;
+        holdMs: number;
+        stepDelayMs: number;
+      }) => {
+        const target = document.elementFromPoint(input.from.x, input.from.y);
+        if (!target) return false;
+        const wait = (ms: number): Promise<void> =>
+          new Promise((resolve) => setTimeout(resolve, ms));
+        const fire = (type: string, x: number, y: number, buttons: number): void => {
+          target.dispatchEvent(
+            new PointerEvent(type, {
+              pointerId: 1,
+              isPrimary: true,
+              pointerType: "mouse",
+              bubbles: true,
+              cancelable: true,
+              composed: true,
+              clientX: x,
+              clientY: y,
+              button: 0,
+              buttons,
+            }),
+          );
+        };
+        fire("pointerdown", input.from.x, input.from.y, 1);
+        if (input.holdMs > 0) await wait(input.holdMs);
+        for (let i = 1; i <= input.steps; i++) {
+          const t = i / input.steps;
+          fire(
+            "pointermove",
+            input.from.x + (input.to.x - input.from.x) * t,
+            input.from.y + (input.to.y - input.from.y) * t,
+            1,
+          );
+          if (input.stepDelayMs > 0) await wait(input.stepDelayMs);
+        }
+        fire("pointerup", input.to.x, input.to.y, 0);
+        return true;
+      },
+      {
+        from,
+        to,
+        steps: cmd.steps ?? 20,
+        holdMs: cmd.holdMs ?? 120,
+        stepDelayMs: cmd.stepDelayMs ?? 16,
+      },
+    );
+    if (!found) {
+      throw {
+        code: "target_not_found",
+        message: `nothing at ${Math.round(from.x)},${Math.round(from.y)} to start a pointer drag from`,
+      };
+    }
   }
 
   async key(cmd: CmdOf<"key">): Promise<ActionResult> {
@@ -687,15 +792,41 @@ export class Session {
     return { pages: await Promise.all(context.pages().map((p) => this.pageInfo(p))) };
   }
 
+  /**
+   * A background tab is created without becoming active and without taking
+   * focus — the operator keeps whatever tab they were on. Every agent opens its
+   * pinned tab this way; a foreground tab is a human asking for a new tab.
+   */
+  private async newPage(context: BrowserContext, background: boolean): Promise<Page> {
+    if (!background) {
+      const page = await context.newPage();
+      this.activeIndex = Math.max(0, context.pages().indexOf(page));
+      return page;
+    }
+    const stay = context.pages()[this.activeIndex];
+    this.suppressActivate++;
+    let page: Page;
+    try {
+      page = await context.newPage();
+    } finally {
+      this.suppressActivate--;
+    }
+    // Chrome foregrounds a freshly opened tab regardless of what we track.
+    if (stay && !stay.isClosed()) await stay.bringToFront().catch(() => undefined);
+    this.activeIndex = context.pages().indexOf(stay ?? page);
+    if (this.activeIndex < 0) this.activeIndex = 0;
+    return page;
+  }
+
   async tabNew(cmd: CmdOf<"tabNew">): Promise<TabsResult> {
     const context = await this.ensureContext();
-    const page = await context.newPage();
-    this.activeIndex = Math.max(0, context.pages().indexOf(page));
+    const page = await this.newPage(context, cmd.background === true);
     if (cmd.url !== undefined) {
       const url = HAS_SCHEME.test(cmd.url) || OPAQUE_SCHEME.test(cmd.url) ? cmd.url : `https://${cmd.url}`;
       await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
     }
-    this.appendAction(cmd, cmd.url === undefined ? "opened a new tab" : `opened a new tab at ${cmd.url}`);
+    const what = cmd.background === true ? "a new background tab" : "a new tab";
+    this.appendAction(cmd, cmd.url === undefined ? `opened ${what}` : `opened ${what} at ${cmd.url}`);
     // `created` is how a pinning caller learns its tab id without racing
     // whichever tab happens to be active by the time it reads the list.
     const tabs = await this.tabs();
@@ -715,11 +846,17 @@ export class Session {
   async tabClose(cmd: CmdOf<"tabClose">): Promise<TabsResult> {
     const context = await this.ensureContext();
     const page = await this.pageFor(cmd.tab);
-    const closed = context.pages().indexOf(page);
+    const before = context.pages();
+    const closed = before.indexOf(page);
+    const stay = before[this.activeIndex];
     await page.close();
-    // Closing a tab ahead of the active one shifts it down; the active page
-    // itself must not change.
-    if (closed >= 0 && closed < this.activeIndex) this.activeIndex--;
+    // Closing any other tab shifts the indexes around the active page but must
+    // not change which page is active — so re-find it by identity rather than
+    // patching the index (the page's own close handler already clamped it).
+    const after = context.pages();
+    const kept = stay && stay !== page ? after.indexOf(stay) : -1;
+    if (kept >= 0) this.activeIndex = kept;
+    else this.activeIndex = Math.max(0, Math.min(this.activeIndex, after.length - 1));
     this.appendAction(cmd, `closed tab ${closed}`);
     return this.tabs();
   }
@@ -797,10 +934,7 @@ export class Session {
 
     this.context = context;
     for (const page of context.pages()) this.track(page);
-    context.on("page", (page) => {
-      this.track(page);
-      this.activeIndex = Math.max(0, context.pages().length - 1);
-    });
+    context.on("page", (p) => this.onNewPage(context, p));
 
     const page = context.pages()[0] ?? (await context.newPage());
     if (activeUrl !== undefined && !OPAQUE_SCHEME.test(activeUrl)) {

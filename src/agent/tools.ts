@@ -100,16 +100,19 @@ interface TabPin {
   close(): Promise<void>;
 }
 
-function createTabPin(profile: string): TabPin {
+function createTabPin(profile: string, startUrl?: string): TabPin {
   // Created on first use rather than up front: building the tools must not
   // launch a browser (BX_TOOL_NAMES builds a throwaway set at import time).
   let pending: Promise<number | undefined> | null = null;
   return {
     tab(): Promise<number | undefined> {
       if (pending === null) {
-        pending = call<TabsResult>(profile, { cmd: "tabNew" }).then((res) =>
-          res.ok ? res.data.created?.id : undefined,
-        );
+        // background: an agent's tab must never displace the operator's.
+        pending = call<TabsResult>(profile, {
+          cmd: "tabNew",
+          url: startUrl,
+          background: true,
+        }).then((res) => (res.ok ? res.data.created?.id : undefined));
       }
       return pending;
     },
@@ -136,7 +139,34 @@ const CANVAS_DESC =
 const IN_DESC =
   "element the coordinates are relative to (its top-left is 0,0), e.g. a canvas testid";
 
-function buildTools(profile: string, sink: ToolSink, pin: TabPin) {
+/**
+ * Where this run's tab has got to. The driver hands the URL to the next rung so
+ * an escalation opens where the previous attempt ended instead of about:blank.
+ */
+interface UrlTracker {
+  note(url: string): void;
+  last(): string | undefined;
+}
+
+function createUrlTracker(initial: string | undefined): UrlTracker {
+  let url = initial;
+  return {
+    note(next: string): void {
+      // about:blank is the absence of a page, not a place to resume from.
+      if (!next.startsWith("about:")) url = next;
+    },
+    last: () => url,
+  };
+}
+
+function buildTools(profile: string, sink: ToolSink, pin: TabPin, track: UrlTracker) {
+  // Every ActionResult names the page it landed on; that is the cheapest place
+  // to keep the tracker current.
+  const acted = (res: CmdResult<ActionResult>, done: string): ToolResult => {
+    if (res.ok) track.note(res.data.page.url);
+    return renderAction(res, done);
+  };
+
   return [
     tool(
       "bx_open",
@@ -147,6 +177,7 @@ function buildTools(profile: string, sink: ToolSink, pin: TabPin) {
         const res = await call<OpenResult>(profile, { cmd: "open", url: args.url, tab });
         if (!res.ok) return say(renderError(res.error));
         const { page, els } = res.data;
+        track.note(page.url);
         return say(`${page.title} — ${page.url}\n${els.rendered}`);
       },
     ),
@@ -171,7 +202,7 @@ function buildTools(profile: string, sink: ToolSink, pin: TabPin) {
         if (!t.ok) return say(`error (bad_request): ${t.message}`);
         const tab = await pin.tab();
         const res = await call<ActionResult>(profile, { cmd: "click", target: t.target, tab });
-        return renderAction(res, `clicked ${args.target}`);
+        return acted(res, `clicked ${args.target}`);
       },
     ),
 
@@ -189,7 +220,7 @@ function buildTools(profile: string, sink: ToolSink, pin: TabPin) {
           value: args.value,
           tab,
         });
-        return renderAction(res, `filled ${args.target} with "${args.value}"`);
+        return acted(res, `filled ${args.target} with "${args.value}"`);
       },
     ),
 
@@ -207,7 +238,7 @@ function buildTools(profile: string, sink: ToolSink, pin: TabPin) {
           value: args.value,
           tab,
         });
-        return renderAction(res, `selected "${args.value}" in ${args.target}`);
+        return acted(res, `selected "${args.value}" in ${args.target}`);
       },
     ),
 
@@ -218,7 +249,7 @@ function buildTools(profile: string, sink: ToolSink, pin: TabPin) {
       async (args) => {
         const tab = await pin.tab();
         const res = await call<ActionResult>(profile, { cmd: "press", key: args.key, tab });
-        return renderAction(res, `pressed ${args.key}`);
+        return acted(res, `pressed ${args.key}`);
       },
     ),
 
@@ -249,7 +280,7 @@ function buildTools(profile: string, sink: ToolSink, pin: TabPin) {
             : args.selector !== undefined
               ? `waited for ${args.selector}`
               : `waited ${args.ms}ms`;
-        return renderAction(res, what);
+        return acted(res, what);
       },
     ),
 
@@ -277,7 +308,7 @@ function buildTools(profile: string, sink: ToolSink, pin: TabPin) {
           tab,
         });
         const where = args.in === undefined ? "" : ` in ${args.in}`;
-        return renderAction(res, `mouse ${args.action} at ${args.x},${args.y}${where}`);
+        return acted(res, `mouse ${args.action} at ${args.x},${args.y}${where}`);
       },
     ),
 
@@ -291,6 +322,12 @@ function buildTools(profile: string, sink: ToolSink, pin: TabPin) {
         toY: z.number(),
         in: z.string().optional().describe(IN_DESC),
         steps: z.number().optional().describe("intermediate moves, default 10"),
+        mode: z
+          .enum(["mouse", "pointer"])
+          .optional()
+          .describe(
+            'use "pointer" when a mouse drag reports success but nothing moved — touch-none / pointer-capture DnD only sees pointer events',
+          ),
       },
       async (args) => {
         const t = args.in === undefined ? undefined : toTarget(args.in);
@@ -304,10 +341,11 @@ function buildTools(profile: string, sink: ToolSink, pin: TabPin) {
           toY: args.toY,
           in: t?.ok ? t.target : undefined,
           steps: args.steps,
+          mode: args.mode,
           tab,
         });
         const where = args.in === undefined ? "" : ` in ${args.in}`;
-        return renderAction(
+        return acted(
           res,
           `dragged ${args.fromX},${args.fromY} → ${args.toX},${args.toY}${where}`,
         );
@@ -326,20 +364,20 @@ function buildTools(profile: string, sink: ToolSink, pin: TabPin) {
           key: args.key,
           tab,
         });
-        return renderAction(res, `key ${args.action} ${args.key}`);
+        return acted(res, `key ${args.action} ${args.key}`);
       },
     ),
 
     tool("bx_back", "Go back one entry in history.", {}, async () => {
       const tab = await pin.tab();
       const res = await call<ActionResult>(profile, { cmd: "back", tab });
-      return renderAction(res, "went back");
+      return acted(res, "went back");
     }),
 
     tool("bx_reload", "Reload the current page.", {}, async () => {
       const tab = await pin.tab();
       const res = await call<ActionResult>(profile, { cmd: "reload", tab });
-      return renderAction(res, "reloaded");
+      return acted(res, "reloaded");
     }),
 
     tool(
@@ -431,6 +469,7 @@ export const BX_TOOL_NAMES: string[] = buildTools(
   "",
   { setReport() {} },
   createTabPin(""),
+  createUrlTracker(undefined),
 ).map((t) => `mcp__${BX_SERVER_NAME}__${t.name}`);
 
 /** The MCP server plus the lifecycle of the tab its tools are pinned to. */
@@ -438,19 +477,24 @@ export interface BxTools {
   server: ReturnType<typeof createSdkMcpServer>;
   /** Releases this run's tab. Safe to call more than once, and never throws. */
   close(): Promise<void>;
+  /** The last page this run reached — a start URL for the rung after it. */
+  lastUrl(): string | undefined;
 }
 
-export function createBxTools(profile: string, sink: ToolSink): BxTools {
-  const pin = createTabPin(profile);
+/** `startUrl` opens this run's tab there instead of about:blank. */
+export function createBxTools(profile: string, sink: ToolSink, startUrl?: string): BxTools {
+  const pin = createTabPin(profile, startUrl);
+  const track = createUrlTracker(startUrl);
   return {
     server: createSdkMcpServer({
       name: BX_SERVER_NAME,
       version: "0.1.0",
-      tools: buildTools(profile, sink, pin),
+      tools: buildTools(profile, sink, pin, track),
       // The driver has one job and a handful of tools; deferring them behind
       // tool search would cost a round trip for no benefit.
       alwaysLoad: true,
     }),
     close: () => pin.close(),
+    lastUrl: () => track.last(),
   };
 }

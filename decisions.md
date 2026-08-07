@@ -2,6 +2,20 @@
 
 Newest first. Append-only; supersede, never delete.
 
+## 2026-08-07 — Pointer drag mode = press-and-settle timing, not event type
+
+**Why:** The SceneBeans Round 2 hypothesis ("touch-none DnD never sees
+Playwright mouse events") turned out false — Chrome synthesizes real
+PointerEvents from CDP mouse input. The actual failure mechanism: Playwright's
+drag reaches its first move ~30ms after mousedown, which pointer-intent DnD
+reads as a flick/scroll, and capture delivery matters. `drag --pointer`
+dispatches synthetic PointerEvents with a default 120ms hold-then-pull,
+per-step delays, and all moves/up delivered to the pointerdown element
+(emulating setPointerCapture). Verified: pointer mode arms a
+press-and-settle shelf every run; default mouse drag never does.
+**Rejected:** trying to slow Playwright's mouse drag with waits (no capture
+semantics, and mouse-mode timing under load is not a contract).
+
 ## 2026-08-06 — Concurrency = tab pinning with per-page ref registries
 
 **Why:** A real-app shakedown ran 5 concurrent `bx agent`s and inferred an

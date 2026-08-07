@@ -110,6 +110,30 @@
         gap: 8px;
         margin-bottom: 16px;
       }
+      .stage {
+        display: flex;
+        align-items: flex-start;
+        gap: 16px;
+      }
+      .shelf {
+        padding: 8px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+      }
+      [data-testid="shelf-chip"] {
+        width: 44px;
+        height: 44px;
+        display: grid;
+        place-items: center;
+        border-radius: 8px;
+        background: var(--accent);
+        color: #fff;
+        cursor: grab;
+        user-select: none;
+        /* The pointer-intent contract: no browser gesture handling at all, so
+           the chip sees every pointer event itself. */
+        touch-action: none;
+      }
     </style>
   </head>
   <body>
@@ -279,12 +303,23 @@
       function renderGame() {
         view.innerHTML = `
           <h1>Game</h1>
-          <canvas id="game" data-testid="game-canvas" width="400" height="300"></canvas>
-          <p data-testid="game-hint">Click to drop a target, drag the square, w/a/s/d or arrows to move.</p>`;
+          <div class="stage">
+            <canvas id="game" data-testid="game-canvas" width="400" height="300"></canvas>
+            <div class="shelf" data-testid="shelf">
+              <div data-testid="shelf-chip">★</div>
+            </div>
+          </div>
+          <p data-testid="game-hint">Click to drop a target, drag the square, w/a/s/d or arrows to move, pull the chip off the shelf onto the canvas.</p>`;
 
         const canvas = view.querySelector("#game");
         const ctx = canvas.getContext("2d");
-        const state = { player: { x: 50, y: 50 }, targets: [], keys: {} };
+        const state = {
+          player: { x: 50, y: 50 },
+          targets: [],
+          keys: {},
+          shelfDrops: [],
+          shelfGesture: null, // last arm decision, for diagnosing a dead drag
+        };
         // Live object: tests read positions straight off it via bx js.
         window.__game = state;
 
@@ -321,6 +356,58 @@
             return;
           }
           state.targets.push(at(e));
+        });
+
+        // The shelf: a pointer-intent chip that listens to pointer events only
+        // (no mouse handlers at all) and hands off to a drag only on a
+        // deliberate, mostly-vertical pull — a flat sideways swipe is the
+        // shelf's own scroll gesture and must not detach the chip.
+        const chip = view.querySelector('[data-testid="shelf-chip"]');
+        const ARM_PX = 10;
+        const ARM_HOLD_MS = 100;
+        let chipFrom = null;
+        let chipDownAt = 0;
+        let chipArmed = false;
+
+        chip.addEventListener("pointerdown", (e) => {
+          chipFrom = { x: e.clientX, y: e.clientY };
+          chipDownAt = performance.now();
+          chipArmed = false;
+          // Real input captures; synthetic pointers have no capture to take.
+          try {
+            chip.setPointerCapture(e.pointerId);
+          } catch {}
+        });
+        chip.addEventListener("pointermove", (e) => {
+          if (!chipFrom) return;
+          const dx = e.clientX - chipFrom.x;
+          const dy = e.clientY - chipFrom.y;
+          if (!chipArmed) {
+            if (Math.hypot(dx, dy) < ARM_PX) return;
+            // Lifting is press, settle, pull: a flat sideways move is the
+            // shelf's scroll, and a move that lands the instant the pointer
+            // goes down is a flick past it, not an intent to drag.
+            const heldMs = performance.now() - chipDownAt;
+            chipArmed = heldMs >= ARM_HOLD_MS && Math.abs(dy) > Math.abs(dx);
+            state.shelfGesture = { dx, dy, heldMs, armed: chipArmed };
+            if (!chipArmed) {
+              chipFrom = null;
+              return;
+            }
+          }
+          chip.style.transform = `translate(${dx}px, ${dy}px)`;
+        });
+        chip.addEventListener("pointerup", (e) => {
+          const armed = chipArmed;
+          chipFrom = null;
+          chipArmed = false;
+          chip.style.transform = "";
+          if (!armed) return;
+          const r = canvas.getBoundingClientRect();
+          const x = e.clientX - r.left;
+          const y = e.clientY - r.top;
+          if (x < 0 || y < 0 || x > r.width || y > r.height) return;
+          state.shelfDrops.push({ x, y });
         });
 
         // Held keys drive the loop below. Both listeners retire themselves once

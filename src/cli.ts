@@ -78,6 +78,10 @@ are relative to that element's top-left, otherwise to the viewport)
                                    [--in <target>] [--button left|right|middle]
   drag <x1> <y1> <x2> <y2>         press, move and release [--in <target>]
                                    [--steps <n>] (default 10 intermediate moves)
+                                   [--pointer] [--hold <ms>] [--step-delay <ms>]
+                                   --pointer dispatches PointerEvents instead of
+                                   mouse events, for touch-none / pointer-intent
+                                   DnD that never sees a mouse
   key <down|up> <key>              hold or release a key, e.g. w — press is the
                                    one-shot version
   wheel <deltaY> [x y]             scroll; x y moves the pointer first
@@ -90,8 +94,12 @@ Flows and automation
   agent "<instruction>"            let a cheap model drive; prints a short report
                                    [--model haiku|sonnet|opus] [--opus]
                                    [--save <name>] [--max-turns <n>] [--verbose]
+                                   [--budget <usd>] [--max-wall <s>]
                                    --opus allows one final escalation to Opus 4.8
                                    — complex flows only, ~5× Sonnet cost
+                                   --budget/--max-wall abort the run at that
+                                   estimated spend or elapsed time and still
+                                   print a report
 
 Daemon
   profiles                         list profiles and which are running
@@ -250,6 +258,17 @@ function takeIn(args: string[]): { target: Target | undefined; where: string } {
   return { target: parseTarget(raw), where: ` in ${q(raw)}` };
 }
 
+/** Millisecond knobs that are allowed to be 0 — "no pause" is a real answer. */
+function takeDelayMs(args: string[], name: string): number | undefined {
+  const value = takeOption(args, name);
+  if (value === undefined) return undefined;
+  const ms = Number(value);
+  if (!Number.isInteger(ms) || ms < 0) {
+    throw new CliError(2, `${name} takes a whole number of milliseconds, 0 or more`);
+  }
+  return ms;
+}
+
 function takeMaxTurns(args: string[]): number | undefined {
   const value = takeOption(args, "--max-turns");
   if (value === undefined) return undefined;
@@ -258,6 +277,26 @@ function takeMaxTurns(args: string[]): number | undefined {
     throw new CliError(2, "--max-turns takes a positive whole number of turns");
   }
   return turns;
+}
+
+function takeBudgetUsd(args: string[]): number | undefined {
+  const value = takeOption(args, "--budget");
+  if (value === undefined) return undefined;
+  const usd = Number(value);
+  if (!Number.isFinite(usd) || usd <= 0) {
+    throw new CliError(2, "--budget takes a positive number of dollars, e.g. --budget 0.25");
+  }
+  return usd;
+}
+
+function takeMaxWallMs(args: string[]): number | undefined {
+  const value = takeOption(args, "--max-wall");
+  if (value === undefined) return undefined;
+  const seconds = Number(value);
+  if (!Number.isInteger(seconds) || seconds <= 0) {
+    throw new CliError(2, "--max-wall takes a positive whole number of seconds");
+  }
+  return seconds * 1000;
 }
 
 function agentModel(model: string | undefined): AgentModel {
@@ -378,8 +417,12 @@ function renderReport(report: AgentReport): string {
   for (const item of report.evidence) lines.push(`  • ${item}`);
   if (report.savedFlow !== undefined) lines.push(`saved flow → ${report.savedFlow}`);
   const u = report.usage;
+  // Anything other than a model-authored report is a run that was cut short —
+  // say so on the trailer, not just inside the summary.
+  const ended =
+    report.endedBy === undefined || report.endedBy === "report" ? "" : ` ended=${report.endedBy}`;
   lines.push(
-    `tier=${report.tier}${report.escalated ? " (escalated)" : ""} turns=${report.turns} ` +
+    `tier=${report.tier}${report.escalated ? " (escalated)" : ""}${ended} turns=${report.turns} ` +
       `wall=${(report.wallMs / 1000).toFixed(1)}s tokens=${u.inputTokens}/${u.outputTokens} ` +
       `(${u.cacheReadTokens} cached) cost=$${u.costUsd === null ? "n/a" : u.costUsd.toFixed(4)}`,
   );
@@ -504,17 +547,24 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
     case "drag": {
       const { target, where } = takeIn(args);
       const rawSteps = takeOption(args, "--steps");
-      const usage = "usage: bx drag <x1> <y1> <x2> <y2> [--in <target>] [--steps <n>]";
+      const usage =
+        "usage: bx drag <x1> <y1> <x2> <y2> [--in <target>] [--steps <n>]" +
+        " [--pointer] [--hold <ms>] [--step-delay <ms>]";
       const steps = rawSteps === undefined ? undefined : coord(rawSteps, "--steps takes a number");
       if (steps !== undefined && (!Number.isInteger(steps) || steps <= 0)) {
         throw new CliError(2, "--steps takes a positive whole number");
       }
+      const mode = takeFlag(args, "--pointer") ? "pointer" : undefined;
+      const holdMs = takeDelayMs(args, "--hold");
+      const stepDelayMs = takeDelayMs(args, "--step-delay");
       const fromX = coord(args[0], usage);
       const fromY = coord(args[1], usage);
       const toX = coord(args[2], usage);
       const toY = coord(args[3], usage);
-      return send<ActionResult>(g, { cmd: "drag", fromX, fromY, toX, toY, in: target, steps }, (d) =>
-        formatAction("dragged", `${fromX},${fromY} → ${toX},${toY}${where}`, d),
+      return send<ActionResult>(
+        g,
+        { cmd: "drag", fromX, fromY, toX, toY, in: target, steps, mode, holdMs, stepDelayMs },
+        (d) => formatAction("dragged", `${fromX},${fromY} → ${toX},${toY}${where}`, d),
       );
     }
 
@@ -662,6 +712,8 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
       const model = agentModel(takeOption(args, "--model"));
       const save = takeOption(args, "--save");
       const maxTurns = takeMaxTurns(args);
+      const budgetUsd = takeBudgetUsd(args);
+      const maxWallMs = takeMaxWallMs(args);
       const verbose = takeFlag(args, "--verbose");
       const escalateOpus = takeFlag(args, "--opus");
       const instruction = args.join(" ").trim();
@@ -669,7 +721,8 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
         throw new CliError(
           2,
           'usage: bx agent "<instruction>" [--model haiku|sonnet|opus] [--opus]' +
-            " [--save <name>] [--max-turns <n>] [--verbose]",
+            " [--save <name>] [--max-turns <n>] [--verbose]" +
+            " [--budget <usd>] [--max-wall <s>]",
         );
       }
       const options: AgentRunOptions = {
@@ -680,6 +733,11 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
         maxTurns,
         verbose,
         escalateOpus,
+        budgetUsd,
+        maxWallMs,
+        // The heartbeat writes to stdout, which under --json must stay a single
+        // parseable document.
+        heartbeatTurns: g.json ? 0 : undefined,
       };
       const { runAgent } = await import("./agent/driver.ts");
       const report = await runAgent(options);

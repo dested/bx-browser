@@ -11,11 +11,15 @@ screenshot loop. Output is budgeted at the source (`els` ~800 tokens, `text`
 ~2000, console/net 30 entries), so never ration `bx els`. Act on text, not
 pixels; screenshot only when the question is genuinely visual.
 
-## Reach for `bx agent` FIRST
+## `bx agent` is the default. Hand-driving is the exception.
 
-For anything phrased as a task — "log in and check the invoice list", "add an
-item and verify the total", "click through settings and confirm the toggle
-sticks" — do NOT drive step by step. Delegate:
+If the work can be phrased as a task with a checkable outcome — "log in and
+check the invoice list", "add an item and verify the total", "reproduce the
+toggle bug" — delegate it. Do not drive step by step first "to see the page";
+the agent orients itself faster and cheaper than you can, and your context
+stays clean. Hand-drive ONLY for: a single quick lookup (one `els`/`text`),
+ground-truth setup before judging an agent, or interactive debugging where you
+must see each intermediate state. When in doubt, delegate.
 
 ```bash
 bx agent "log in as demo@acme.test and verify the invoice list loads" --save invoices
@@ -32,8 +36,18 @@ bx agent "log in as demo@acme.test and verify the invoice list loads" --save inv
   correct on a production app. Canvas tasks run longer — raise the budget with
   `--max-turns 60` for multi-step game work.
 - Every run writes a full turn-by-turn transcript to `~/.bx/agent-runs/` (path
-  in the trailer); `--verbose` streams it live to stderr. A failed run's report
-  says where it got stuck — read it before re-running.
+  in the trailer); `--verbose` streams it live to stderr; a heartbeat line
+  (turn · est cost · last action) prints every ~10 turns regardless. A failed
+  run's report says where it got stuck — read it before re-running.
+- **Set `--budget <usd>` on anything exploratory** (e.g. `--budget 0.25`) and
+  `--max-wall <s>` on anything unattended — the run aborts cleanly with a fail
+  report instead of burning the full escalation ladder. Stalled rungs (same
+  actions repeating, no progress) end early and escalate on their own.
+- Canvas wayfinding caveat: the agent verifies canvas state well via `bx_js`,
+  but it cannot FIND an unlabeled target on a canvas it can't see. For
+  canvas-first apps, put an app-exposed handle in the instruction (e.g. "use
+  window.__studio to open the first game's editor") — that is the intended
+  path, and blind pixel-guessing is what burns budgets.
 - **Fan out freely.** Every agent run is pinned to its own browser tab with its
   own element refs — concurrent agents cannot interfere with each other or with
   your own bx commands (which use the active tab). Tested 5-wide; launch
@@ -75,7 +89,7 @@ text — in that order.
 | snap | `bx snap [path] [--full]` | downscaled PNG path — `Read` it only if needed |
 | tabs | `bx tabs` / `bx tab <n>` / `bx tab new [url]` / `bx tab close` | |
 | run | `bx run <flow.ts> [--record]` | replay a flow; zero model tokens |
-| agent | `bx agent "<task>" [--model haiku\|sonnet\|opus] [--opus] [--save <n>] [--max-turns <n>] [--verbose]` | delegate |
+| agent | `bx agent "<task>" [--model haiku\|sonnet\|opus] [--opus] [--save <n>] [--max-turns <n>] [--budget <usd>] [--max-wall <s>] [--verbose]` | delegate |
 | record | `bx record start <slug>` / `bx record stop` | video → narrated package |
 | admin | `bx status` / `bx profiles` / `bx stop` | daemon lifecycle |
 
@@ -91,11 +105,19 @@ so positions mean "inside the canvas":
 ```bash
 bx mouse click 200 150 --in "game-canvas"   # also: dblclick, move, down, up
 bx drag 50 50 300 200 --in "game-canvas"    # mousedown → moves → mouseup
+bx drag 50 50 300 200 --in "shelf" --pointer  # press-and-settle PointerEvents:
+                                              # real DnD often needs a ~120ms
+                                              # hold + capture-correct delivery,
+                                              # not Playwright's instant drag
 bx key down w                               # hold a key (WASD movement)
 bx wait 500
 bx key up w
 bx wheel -120 --in "game-canvas"            # scroll/zoom
 ```
+
+If a mouse-mode drag "succeeds" but nothing moved, the target's DnD likely
+requires press-and-settle timing (a hold before the first move) — retry with
+`--pointer`, and tune `--hold <ms>` if it still doesn't take.
 
 Pair with `bx js` to read game state the app exposes, and `bx snap` when the
 claim is visual. These log to the action log and synthesize into flows like

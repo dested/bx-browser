@@ -43,6 +43,10 @@ export interface MouseOptions {
 export interface DragOptions {
   in?: string;
   steps?: number;
+  /** "pointer" dispatches PointerEvents for touch-none/pointer-intent DnD. */
+  mode?: "mouse" | "pointer";
+  holdMs?: number;
+  stepDelayMs?: number;
 }
 export interface WheelOptions {
   x?: number;
@@ -194,7 +198,8 @@ export class FlowContext {
     opts?: DragOptions,
   ): Promise<void> {
     const where = opts?.in === undefined ? "" : ` in ${q(opts.in)}`;
-    await this.step<ActionResult>(`drag ${fromX},${fromY} → ${toX},${toY}${where}`, {
+    const mode = opts?.mode === "pointer" ? " (pointer)" : "";
+    await this.step<ActionResult>(`drag ${fromX},${fromY} → ${toX},${toY}${where}${mode}`, {
       cmd: "drag",
       fromX,
       fromY,
@@ -202,6 +207,9 @@ export class FlowContext {
       toY,
       in: opts?.in === undefined ? undefined : parseTarget(opts.in),
       steps: opts?.steps,
+      mode: opts?.mode,
+      holdMs: opts?.holdMs,
+      stepDelayMs: opts?.stepDelayMs,
     });
   }
 

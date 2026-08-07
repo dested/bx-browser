@@ -433,3 +433,147 @@ test(
   },
   TIMEOUT,
 );
+
+// ---------------------------------------------------------------------------
+// The shelf chip is the pointer-intent case: touch-action:none, pointer
+// listeners only, and it arms a drag only on a deliberate mostly-vertical pull.
+// ---------------------------------------------------------------------------
+
+interface Rect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+function isRect(value: unknown): value is Rect {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "x" in value &&
+    typeof value.x === "number" &&
+    "y" in value &&
+    typeof value.y === "number" &&
+    "width" in value &&
+    typeof value.width === "number" &&
+    "height" in value &&
+    typeof value.height === "number"
+  );
+}
+
+/** Viewport box of a testid, so a drag can span two elements. */
+async function rectOf(testid: string): Promise<Rect> {
+  const expression = `(() => { const b = document.querySelector('[data-testid="${testid}"]').getBoundingClientRect(); return { x: b.x, y: b.y, width: b.width, height: b.height }; })()`;
+  const r = ok(await cmd<JsResult>(PROFILE, { cmd: "js", expression }), `rect of ${testid}`);
+  const parsed: unknown = JSON.parse(r.value);
+  if (!isRect(parsed)) throw new Error(`no box for "${testid}": ${r.value}`);
+  return parsed;
+}
+
+/** Chip centre → a canvas point the shelf's pull heuristic will accept. */
+const DROP = { x: 360, y: 265 };
+
+interface Point {
+  x: number;
+  y: number;
+}
+
+async function shelfPath(): Promise<{ from: Point; to: Point }> {
+  const chip = await rectOf("shelf-chip");
+  const canvas = await rectOf("game-canvas");
+  const from = { x: chip.x + chip.width / 2, y: chip.y + chip.height / 2 };
+  const to = { x: canvas.x + DROP.x, y: canvas.y + DROP.y };
+  // The chip only arms when the pull is mostly vertical, and the drag
+  // interpolates in a straight line — so the whole path has to qualify.
+  if (Math.abs(to.y - from.y) <= Math.abs(to.x - from.x)) {
+    throw new Error(`shelf → canvas path is not mostly vertical: ${JSON.stringify({ from, to })}`);
+  }
+  return { from, to };
+}
+
+test(
+  "pointer-mode drag satisfies a pointer-intent shelf",
+  async () => {
+    await gotoGame();
+    const { from, to } = await shelfPath();
+
+    ok(
+      await cmd<ActionResult>(PROFILE, {
+        cmd: "drag",
+        fromX: from.x,
+        fromY: from.y,
+        toX: to.x,
+        toY: to.y,
+        mode: "pointer",
+      }),
+      "pointer drag chip → canvas",
+    );
+
+    const drops = await gameValue("window.__game.shelfDrops.length");
+    if (drops === 0) throw new Error("the pointer drag never armed the shelf chip");
+    expect(drops).toBe(1);
+    expect(Math.abs((await gameValue("window.__game.shelfDrops[0].x")) - DROP.x)).toBeLessThanOrEqual(8);
+    expect(Math.abs((await gameValue("window.__game.shelfDrops[0].y")) - DROP.y)).toBeLessThanOrEqual(8);
+  },
+  TIMEOUT,
+);
+
+test(
+  "mouse-mode drag does not arm the pointer-intent shelf",
+  async () => {
+    await gotoGame();
+    const { from, to } = await shelfPath();
+
+    ok(
+      await cmd<ActionResult>(PROFILE, {
+        cmd: "drag",
+        fromX: from.x,
+        fromY: from.y,
+        toX: to.x,
+        toY: to.y,
+      }),
+      "mouse drag chip → canvas",
+    );
+
+    // This is why pointer mode exists: the identical gesture over Playwright's
+    // mouse arrives as one instant burst, so the shelf reads it as a flick and
+    // never hands the chip off.
+    const held = await gameValue(
+      "window.__game.shelfGesture ? window.__game.shelfGesture.heldMs : -1",
+    );
+    console.log(
+      `mouse-mode drag hit the shelf threshold ${held.toFixed(1)}ms after pointerdown (arms at 100ms)`,
+    );
+    expect(await gameValue("window.__game.shelfDrops.length")).toBe(0);
+  },
+  TIMEOUT,
+);
+
+test(
+  "a background tab does not steal the active tab",
+  async () => {
+    const activeId = async (what: string): Promise<number> => {
+      const tabs = ok(await cmd<TabsResult>(PROFILE, { cmd: "tabs" }), what);
+      const active = tabs.pages.find((p) => p.active);
+      if (!active) throw new Error(`${what}: no page is active`);
+      return active.id;
+    };
+
+    const before = await activeId("tabs before");
+
+    const created = ok(
+      await cmd<TabsResult>(PROFILE, { cmd: "tabNew", background: true }),
+      "tabNew background",
+    ).created;
+    if (!created) throw new Error("tabNew returned no created page");
+    expect(created.id).not.toBe(before);
+    expect(created.active).toBe(false);
+
+    // Identity, not index: a new tab shifts nothing, but a closed one does.
+    expect(await activeId("tabs after tabNew")).toBe(before);
+
+    ok(await cmd<TabsResult>(PROFILE, { cmd: "tabClose", tab: created.id }), "close background tab");
+    expect(await activeId("tabs after tabClose")).toBe(before);
+  },
+  TIMEOUT,
+);

@@ -73,6 +73,9 @@ function linesFor(entry: ActionLogEntry): string[] {
       const opts = [
         ...(c.in ? [`in: ${q(stable(entry, c.in))}`] : []),
         ...(c.steps === undefined ? [] : [`steps: ${c.steps}`]),
+        ...(c.mode === undefined ? [] : [`mode: ${q(c.mode)}`]),
+        ...(c.holdMs === undefined ? [] : [`holdMs: ${c.holdMs}`]),
+        ...(c.stepDelayMs === undefined ? [] : [`stepDelayMs: ${c.stepDelayMs}`]),
       ];
       return [`await b.drag(${c.fromX}, ${c.fromY}, ${c.toX}, ${c.toY}${options(opts)});`];
     }

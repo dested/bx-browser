@@ -33,18 +33,35 @@ const MODEL_IDS: Record<AgentModel, string> = {
 
 const MAX_TURNS = 40;
 
+// USD per million tokens, per tier. Only used for mid-run governance — the
+// trailer still prefers the SDK's own cost when it reports one.
+const PRICING: Record<AgentModel, { input: number; output: number }> = {
+  haiku: { input: 1, output: 5 },
+  sonnet: { input: 3, output: 15 },
+  opus: { input: 5, output: 25 },
+};
+const CACHE_READ_RATE = 0.1; // cache reads bill at a tenth of the input rate
+
 const AGENT_RUNS_DIR = "agent-runs"; // ~/.bx/agent-runs/<ts>.jsonl
 const TOOL_RESULT_MAX_CHARS = 2000;
 const VERBOSE_LINE_MAX_CHARS = 160;
 const EXHAUSTION_EVIDENCE = 8; // action-log entries attached to a synthesized report
 const ESCALATION_ACTIONS = 5; // prior-attempt actions handed to the bigger model
+const STALL_WINDOW = 8; // tool calls examined for repetition
+const STALL_DISTINCT = 3; // at or below this many distinct calls in the window = stuck
+const STALL_EVIDENCE = 4; // distinct repeated calls named in the stall report
+const HEARTBEAT_TURNS = 10;
+const HEARTBEAT_INPUT_MAX_CHARS = 48;
 
 const SYSTEM = `You are bx-driver, operating a real browser through bx tools. You cannot see the screen; you see distilled text. Work fast and precisely.
 Method: (1) bx_open the target URL, or bx_els to see the current page. (2) Element lists show numbered refs like [3] button "Save" — act on them by passing the number as target, or pass visible text / a data-testid. (3) After any action that changes the page, the result tells you; call bx_els again only when you need fresh refs. (4) Verify every task outcome with bx_expect before reporting. (5) If a target is not found, read the 'did you mean' candidates and retry once with the best one. (6) Check bx_console if something seems broken.
 Canvas/games: when the page is a canvas with no useful elements, act by coordinates — bx_mouse/bx_drag/bx_key with in set to the canvas testid so x/y are relative to its top-left; hold movement keys with bx_key down then up. You cannot see the canvas: read state the app exposes via bx_js (e.g. window.__game) and verify outcomes with bx_js too — bx_expect only sees DOM text.
+Finding targets on a canvas: you cannot see it, so never guess pixel positions for an unlabeled target. First map the app's exposed handles — bx_js Object.keys(window).filter(k => k.startsWith('__')) — then explore the promising one (Object.keys, .getState?.()). Prefer calling an app navigation/store action or opening a deep-link URL via bx_js over blind coordinate clicks; coordinates are for targets whose position you actually know from the task, from state, or from element-relative geometry.
 Rules: never invent selectors; prefer testids and visible text. Keep to the task — do not explore. When the task is done (or truly impossible), call bx_report exactly once with status, a 2–3 sentence summary, and evidence (assertions passed, final URL). Then stop.`;
 
 type Report = { status: "pass" | "fail"; summary: string; evidence: string[] };
+
+type EndedBy = NonNullable<AgentReport["endedBy"]>;
 
 interface Attempt {
   tier: AgentModel;
@@ -53,12 +70,72 @@ interface Attempt {
   usage: AgentUsage;
   /** What this attempt actually did, from the daemon action log. */
   actions: string[];
+  endedBy: EndedBy;
+  /** Last page URL this attempt reached; the next rung starts there. */
+  lastUrl?: string;
 }
 
 /** What an escalation is told about the attempt it is replacing. */
 interface Prior {
   summary: string;
   actions: string[];
+  lastUrl?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Governance. Spend, wall clock and turn count are properties of the whole
+// ladder, not of one rung — a budget the first rung nearly exhausts must not
+// reset when the escalation starts.
+// ---------------------------------------------------------------------------
+
+interface RunState {
+  started: number;
+  estUsd: number;
+  turns: number;
+}
+
+type AssistantUsage = Extract<SDKMessage, { type: "assistant" }>["message"]["usage"];
+
+function messageCostUsd(tier: AgentModel, usage: AssistantUsage): number {
+  const price = PRICING[tier];
+  const cacheRead = usage.cache_read_input_tokens ?? 0;
+  const input = usage.input_tokens * price.input + cacheRead * price.input * CACHE_READ_RATE;
+  return (input + usage.output_tokens * price.output) / 1_000_000;
+}
+
+interface Ceiling {
+  kind: "budget" | "wall";
+  summary: string;
+}
+
+function wallCeilingSummary(maxWallMs: number): string {
+  return `aborted: wall ceiling ${Math.round(maxWallMs / 1000)}s reached`;
+}
+
+function ceilingHit(opts: AgentRunOptions, run: RunState): Ceiling | null {
+  const { budgetUsd, maxWallMs } = opts;
+  if (budgetUsd !== undefined && run.estUsd >= budgetUsd) {
+    return {
+      kind: "budget",
+      summary: `aborted: budget ceiling $${budgetUsd} reached (est $${run.estUsd.toFixed(4)} spent)`,
+    };
+  }
+  if (maxWallMs !== undefined && Date.now() - run.started >= maxWallMs) {
+    return { kind: "wall", summary: wallCeilingSummary(maxWallMs) };
+  }
+  return null;
+}
+
+/** A full window holding almost no distinct calls is a model going in circles. */
+function stalledCalls(recent: string[], window: number): string[] | null {
+  if (window <= 0 || recent.length < window) return null;
+  const counts = new Map<string, number>();
+  for (const call of recent) counts.set(call, (counts.get(call) ?? 0) + 1);
+  if (counts.size > STALL_DISTINCT) return null;
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, STALL_EVIDENCE)
+    .map(([call, n]) => `${clip(call, HEARTBEAT_INPUT_MAX_CHARS)} ×${n}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -181,6 +258,7 @@ async function runAttempt(
   tier: AgentModel,
   prior: Prior | null,
   transcript: Transcript,
+  run: RunState,
 ): Promise<Attempt> {
   const startIndex = await actionLogNextIndex(opts.profile);
 
@@ -194,8 +272,9 @@ async function runAttempt(
   };
 
   // Each attempt drives its own tab, so an escalation starts in a fresh page
-  // and two concurrent runs never share one.
-  const tools = createBxTools(opts.profile, sink);
+  // and two concurrent runs never share one. Handing that tab the URL the last
+  // rung reached is what makes the "orient yourself" instruction below true.
+  const tools = createBxTools(opts.profile, sink, prior?.lastUrl);
 
   // An escalation that only knows the prior summary re-runs the same failure at
   // a higher price; the actions tell it where the cheap model actually got to.
@@ -203,14 +282,25 @@ async function runAttempt(
     prior === null || prior.actions.length === 0
       ? ""
       : ` Its last actions: ${prior.actions.join("; ")}.`;
+  const orient =
+    prior?.lastUrl === undefined
+      ? "The browser is in whatever state it left. Start by calling bx_els to orient, then complete the task."
+      : `You start in a fresh tab already open at ${prior.lastUrl} (where the previous attempt ended). Call bx_els to orient, then continue.`;
   const prompt =
     prior === null
       ? opts.instruction
-      : `A previous attempt by a smaller model did not complete this task (its last report: ${prior.summary}).${priorActions} The browser is in whatever state it left. Start by calling bx_els to orient, then complete the task.\n\n${opts.instruction}`;
+      : `A previous attempt by a smaller model did not complete this task (its last report: ${prior.summary}).${priorActions} ${orient}\n\n${opts.instruction}`;
 
   const maxTurns = opts.maxTurns ?? MAX_TURNS;
+  const stallWindow = opts.stallWindow ?? STALL_WINDOW;
+  const heartbeatTurns = opts.heartbeatTurns ?? HEARTBEAT_TURNS;
+
+  // The SDK's own cancellation path: abort, then break, so the session is torn
+  // down rather than left to finish a turn nobody is going to read.
+  const controller = new AbortController();
 
   const options: Options = {
+    abortController: controller,
     model: MODEL_IDS[tier],
     mcpServers: { [BX_SERVER_NAME]: tools.server },
     // `tools: []` drops every built-in (Bash, Read, Edit, WebFetch…); the MCP
@@ -230,6 +320,23 @@ async function runAttempt(
   let turns = 0;
   let usage: AgentUsage = { ...ZERO_USAGE };
   let failure: string | null = null;
+  let stopped: { by: EndedBy; summary: string; extra: string[] } | null = null;
+  let last = "(no tool calls yet)";
+  const recent: string[] = []; // sliding window of (tool, input) pairs
+
+  // Spend can only be reassessed when a message arrives, but the clock cannot
+  // wait for one — a turn in flight would push the wall ceiling past itself.
+  const maxWallMs = opts.maxWallMs;
+  const wallTimer =
+    maxWallMs === undefined
+      ? null
+      : setTimeout(
+          () => {
+            stopped ??= { by: "wall", summary: wallCeilingSummary(maxWallMs), extra: [] };
+            controller.abort();
+          },
+          Math.max(0, maxWallMs - (Date.now() - run.started)),
+        );
 
   const record = async (event: TranscriptEvent): Promise<void> => {
     if (opts.verbose === true) {
@@ -242,16 +349,28 @@ async function runAttempt(
     for await (const message of query({ prompt, options })) {
       if (message.type === "assistant") {
         turns += 1;
+        run.turns += 1;
+        run.estUsd += messageCostUsd(tier, message.message.usage);
         for (const block of message.message.content) {
           if (block.type === "text") {
-            if (block.text.trim().length > 0) await record({ kind: "text", text: block.text });
+            if (block.text.trim().length === 0) continue;
+            last = clip(block.text.replace(/\s+/g, " ").trim(), HEARTBEAT_INPUT_MAX_CHARS);
+            await record({ kind: "text", text: block.text });
           } else if (block.type === "tool_use") {
-            await record({
-              kind: "tool_call",
-              tool: toolLabel(block.name),
-              input: JSON.stringify(block.input),
-            });
+            const tool = toolLabel(block.name);
+            const input = JSON.stringify(block.input);
+            last = clip(`${tool} ${input}`, HEARTBEAT_INPUT_MAX_CHARS);
+            if (stallWindow > 0) {
+              recent.push(`${tool} ${input}`);
+              if (recent.length > stallWindow) recent.shift();
+            }
+            await record({ kind: "tool_call", tool, input });
           }
+        }
+        if (heartbeatTurns > 0 && run.turns % heartbeatTurns === 0) {
+          process.stdout.write(
+            `… turn ${run.turns} · ~$${run.estUsd.toFixed(2)} · last: ${last}\n`,
+          );
         }
       } else if (message.type === "user") {
         for (const event of toolResultEvents(message.message.content)) await record(event);
@@ -263,10 +382,34 @@ async function runAttempt(
           costUsd: message.total_cost_usd,
         };
       }
+
+      // A model that has already reported is one message from stopping on its
+      // own; only an unreported run is worth cutting short.
+      if (box.report !== null) continue;
+      if (stopped !== null) break; // the wall timer got there first
+      const ceiling = ceilingHit(opts, run);
+      if (ceiling !== null) {
+        stopped = { by: ceiling.kind, summary: ceiling.summary, extra: [] };
+      } else {
+        const repeated = stalledCalls(recent, stallWindow);
+        if (repeated !== null) {
+          stopped = {
+            by: "stall",
+            summary: "stalled: repeating the same actions with no progress",
+            extra: [`repeated in the last ${stallWindow} calls: ${repeated.join(", ")}`],
+          };
+        }
+      }
+      if (stopped !== null) {
+        controller.abort();
+        break;
+      }
     }
   } catch (e: unknown) {
-    failure = e instanceof Error ? e.message : String(e);
+    // An abort we asked for is not a failure — the ending is already decided.
+    if (stopped === null) failure = e instanceof Error ? e.message : String(e);
   } finally {
+    if (wallTimer !== null) clearTimeout(wallTimer);
     // A failed attempt must not leak its tab, and a dead daemon must not turn
     // cleanup into the run's outcome.
     await tools.close().catch(() => undefined);
@@ -278,8 +421,19 @@ async function runAttempt(
   // file exists to avoid: synthesize the report the model owed us, with what it
   // did as evidence. Turn exhaustion surfaces as a thrown SDK error, so the
   // message decides which of the two summaries applies.
-  if (box.report === null) {
+  let endedBy: EndedBy;
+  if (box.report !== null) {
+    endedBy = "report";
+  } else if (stopped !== null) {
+    endedBy = stopped.by;
+    box.report = {
+      status: "fail",
+      summary: stopped.summary,
+      evidence: [...stopped.extra, ...actions],
+    };
+  } else {
     const exhausted = failure === null || /maximum number of turns/i.test(failure);
+    endedBy = exhausted ? "turns" : "error";
     box.report = {
       status: "fail",
       summary: exhausted
@@ -289,7 +443,7 @@ async function runAttempt(
     };
   }
 
-  return { tier, report: box.report, turns, usage, actions };
+  return { tier, report: box.report, turns, usage, actions, endedBy, lastUrl: tools.lastUrl() };
 }
 
 async function saveFlow(
@@ -315,7 +469,11 @@ async function saveFlow(
 }
 
 /** Appended per run so `bx` usage can be audited after the fact. Best effort. */
-async function appendRunLog(opts: AgentRunOptions, report: AgentReport): Promise<void> {
+async function appendRunLog(
+  opts: AgentRunOptions,
+  report: AgentReport,
+  estUsd: number,
+): Promise<void> {
   try {
     const dir = path.join(homedir(), BX_DIR_NAME);
     await mkdir(dir, { recursive: true });
@@ -325,9 +483,11 @@ async function appendRunLog(opts: AgentRunOptions, report: AgentReport): Promise
       tier: report.tier,
       escalated: report.escalated,
       status: report.status,
+      endedBy: report.endedBy,
       turns: report.turns,
       wallMs: report.wallMs,
       usage: report.usage,
+      estUsd,
     });
     await appendFile(path.join(dir, "agent-log.jsonl"), `${line}\n`, "utf8");
   } catch {
@@ -337,6 +497,7 @@ async function appendRunLog(opts: AgentRunOptions, report: AgentReport): Promise
 
 export async function runAgent(opts: AgentRunOptions): Promise<AgentReport> {
   const started = Date.now();
+  const run: RunState = { started, estUsd: 0, turns: 0 };
 
   // Mark where this run's actions begin, so a synthesized flow contains only
   // what the agent did. A daemon that isn't up yet simply has no history —
@@ -347,7 +508,7 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentReport> {
   const transcript = createTranscript();
 
   const attempts: Attempt[] = [];
-  let attempt = await runAttempt(opts, opts.model, null, transcript);
+  let attempt = await runAttempt(opts, opts.model, null, transcript, run);
   attempts.push(attempt);
 
   // The ladder above the starting tier: haiku always gets one Sonnet retry,
@@ -359,11 +520,15 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentReport> {
 
   for (const tier of ladder) {
     if (attempt.report?.status === "pass") break;
+    // A ceiling ends the run, not just the rung: escalating past a spend or
+    // wall limit is exactly the runaway the limit exists to prevent.
+    if (ceilingHit(opts, run) !== null) break;
     const prior: Prior = {
       summary: attempt.report?.summary ?? "none",
       actions: attempt.actions.slice(-ESCALATION_ACTIONS),
+      lastUrl: attempt.lastUrl,
     };
-    attempt = await runAttempt(opts, tier, prior, transcript);
+    attempt = await runAttempt(opts, tier, prior, transcript, run);
     attempts.push(attempt);
   }
   const escalated = attempts.length > 1;
@@ -384,12 +549,13 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentReport> {
     wallMs: Date.now() - started,
     usage: attempts.reduce<AgentUsage>((u, a) => addUsage(u, a.usage), { ...ZERO_USAGE }),
     transcriptPath: transcript.path,
+    endedBy: attempt.endedBy,
   };
 
   if (opts.save !== undefined && report.status === "pass") {
     report.savedFlow = await saveFlow(opts, opts.save, startIndex);
   }
 
-  await appendRunLog(opts, report);
+  await appendRunLog(opts, report, run.estUsd);
   return report;
 }
