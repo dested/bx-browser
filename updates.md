@@ -1,5 +1,19 @@
 # Updates
 
+## 2026-08-06 — shakedown fixes, tab isolation, canvas verbs, landing site
+Real-app shakedown (Coterie) drove the roadmap: fixed --save flows (passing
+expects now logged + synthesized; bx run resolves "bx/flow" anywhere via
+entry-file onLoad rewrite — Bun onResolve can't see bare specifiers), MSYS
+path-mangling auto-repair, --help short-circuit, --json ms + BX_TIMING=1.
+Made agent concurrency a real guarantee: stable tab ids, per-page ref
+registries, every agent pinned to its own tab (closed in finally). Added
+canvas/gamedev verbs (mouse/drag/key/wheel, element-relative via --in) +
+fixture #/game + 3 smoke tests (18/18 green). Rewrote SKILL.md agent-first.
+Built site/ (Vite+React+Tailwind, bx.dested.com) — interactive terminal,
+transcript race, real artifacts. bx linked globally + skill installed.
+Touched: src/** (protocol, session, daemon, cli, flows, agent), fixtures/,
+tests/, skill/, site/**, README.md
+
 ## 2026-08-06 — recording pipeline + comparison blog post
 Landed record start/stop: relaunch-cycle video capture, in-browser
 video-to-prompt distill via /harness routes, action log grafted as timed

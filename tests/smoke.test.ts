@@ -20,8 +20,10 @@ import type {
   El,
   ElsResult,
   ExpectResult,
+  JsResult,
   NetEntry,
   OpenResult,
+  TabsResult,
   TextResult,
 } from "../src/protocol.ts";
 
@@ -273,6 +275,161 @@ export default smokeNav;
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  },
+  TIMEOUT,
+);
+
+test(
+  "tab pinning isolates concurrent streams",
+  async () => {
+    const newTab = async (what: string): Promise<number> => {
+      const created = ok(await cmd<TabsResult>(PROFILE, { cmd: "tabNew" }), what).created;
+      if (!created) throw new Error(`${what} returned no created page`);
+      return created.id;
+    };
+
+    const a = await newTab("tabNew A");
+    const b = await newTab("tabNew B");
+
+    ok(await cmd<OpenResult>(PROFILE, { cmd: "open", url: `${fixture}#/tasks`, tab: a }), "open A");
+    ok(
+      await cmd<OpenResult>(PROFILE, { cmd: "open", url: `${fixture}#/settings`, tab: b }),
+      "open B",
+    );
+
+    // A scans, then B scans twice — a shared registry would leave A's refs
+    // pointing at B's page (or stale) by the time A acts on them.
+    const scanA = ok(await cmd<ElsResult>(PROFILE, { cmd: "els", tab: a }), "els A");
+    const addTask = scanA.els.find((el) => mentions(el, "add-task"));
+    if (!addTask) throw new Error(`no add-task element in tab A:\n${scanA.rendered}`);
+
+    ok(await cmd<ElsResult>(PROFILE, { cmd: "els", tab: b }), "els B");
+    ok(await cmd<ElsResult>(PROFILE, { cmd: "els", tab: b }), "els B again");
+
+    const clicked = await cmd<ActionResult>(PROFILE, {
+      cmd: "click",
+      target: { ref: addTask.ref },
+      tab: a,
+    });
+    if (!clicked.ok) {
+      throw new Error(`A's ref ${addTask.ref} did not survive B's scans: ${clicked.error.code} — ${clicked.error.message}`);
+    }
+    expect(clicked.ok).toBe(true);
+
+    const textA = ok(await cmd<TextResult>(PROFILE, { cmd: "text", tab: a }), "text A");
+    const textB = ok(await cmd<TextResult>(PROFILE, { cmd: "text", tab: b }), "text B");
+    expect(textA.text).toContain("Load slow widget");
+    expect(textA.text).not.toContain("Dark mode");
+    expect(textB.text).toContain("Dark mode");
+    expect(textB.text).not.toContain("Load slow widget");
+
+    ok(await cmd<TabsResult>(PROFILE, { cmd: "tabClose", tab: a }), "close A");
+    ok(await cmd<TabsResult>(PROFILE, { cmd: "tabClose", tab: b }), "close B");
+  },
+  TIMEOUT,
+);
+
+test(
+  "pinned command on closed tab → no_page",
+  async () => {
+    const created = ok(await cmd<TabsResult>(PROFILE, { cmd: "tabNew" }), "tabNew").created;
+    if (!created) throw new Error("tabNew returned no created page");
+
+    ok(await cmd<TabsResult>(PROFILE, { cmd: "tabClose", tab: created.id }), "tabClose");
+
+    const r = await cmd<ElsResult>(PROFILE, { cmd: "els", tab: created.id });
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error(`els on closed tab ${created.id} succeeded`);
+    expect(r.error.code).toBe("no_page");
+  },
+  TIMEOUT,
+);
+
+// ---------------------------------------------------------------------------
+// Coordinate verbs against the fixture's canvas mini-game. The game view holds
+// no addressable DOM, so these are the only way to drive it.
+// ---------------------------------------------------------------------------
+
+const CANVAS = { text: "game-canvas" };
+
+/** Re-enters the game view so every test starts from a fresh game state. */
+async function gotoGame(): Promise<void> {
+  ok(await cmd<ActionResult>(PROFILE, { cmd: "click", target: { text: "Tasks" } }), "nav to Tasks");
+  ok(await cmd<ActionResult>(PROFILE, { cmd: "click", target: { text: "Game" } }), "nav to Game");
+}
+
+async function gameValue(expression: string): Promise<number> {
+  const r = ok(await cmd<JsResult>(PROFILE, { cmd: "js", expression }), expression);
+  const value = JSON.parse(r.value);
+  if (typeof value !== "number") throw new Error(`${expression} → ${r.value}, expected a number`);
+  return value;
+}
+
+test(
+  "mouse click lands at canvas-relative coordinates",
+  async () => {
+    await gotoGame();
+
+    ok(
+      await cmd<ActionResult>(PROFILE, {
+        cmd: "mouse",
+        action: "click",
+        x: 200,
+        y: 150,
+        in: CANVAS,
+      }),
+      "mouse click in canvas",
+    );
+
+    const count = await gameValue("window.__game.targets.length");
+    if (count === 0) throw new Error("the canvas received no click event");
+    expect(Math.abs((await gameValue("window.__game.targets[0].x")) - 200)).toBeLessThanOrEqual(2);
+    expect(Math.abs((await gameValue("window.__game.targets[0].y")) - 150)).toBeLessThanOrEqual(2);
+  },
+  TIMEOUT,
+);
+
+test(
+  "held key moves the player",
+  async () => {
+    await gotoGame();
+    const startY = await gameValue("window.__game.player.y");
+
+    ok(await cmd<ActionResult>(PROFILE, { cmd: "key", action: "down", key: "w" }), "key down w");
+    ok(await cmd<ActionResult>(PROFILE, { cmd: "wait", ms: 300 }), "hold w");
+    ok(await cmd<ActionResult>(PROFILE, { cmd: "key", action: "up", key: "w" }), "key up w");
+
+    const endY = await gameValue("window.__game.player.y");
+    if (endY >= startY) throw new Error(`holding w did not move the player up: ${startY} → ${endY}`);
+    expect(endY).toBeLessThan(startY - 10);
+
+    // The key must actually be released — a stuck key would keep it moving.
+    const settled = await gameValue("window.__game.player.y");
+    ok(await cmd<ActionResult>(PROFILE, { cmd: "wait", ms: 200 }), "settle");
+    expect(await gameValue("window.__game.player.y")).toBe(settled);
+  },
+  TIMEOUT,
+);
+
+test(
+  "drag moves the player square",
+  async () => {
+    await gotoGame();
+
+    ok(
+      await cmd<ActionResult>(PROFILE, {
+        cmd: "drag",
+        fromX: 50,
+        fromY: 50,
+        toX: 300,
+        toY: 200,
+        in: CANVAS,
+      }),
+      "drag in canvas",
+    );
+
+    expect(Math.abs((await gameValue("window.__game.player.x")) - 300)).toBeLessThanOrEqual(5);
+    expect(Math.abs((await gameValue("window.__game.player.y")) - 200)).toBeLessThanOrEqual(5);
   },
   TIMEOUT,
 );

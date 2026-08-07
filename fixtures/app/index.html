@@ -136,6 +136,7 @@
           <nav>
             <a href="#/tasks">Tasks</a>
             <a href="#/settings">Settings</a>
+            <a href="#/game">Game</a>
             <button class="secondary" data-testid="sign-out">Sign out</button>
           </nav>`;
         navHost.querySelector('[data-testid="sign-out"]').addEventListener("click", () => {
@@ -273,6 +274,94 @@
         });
       }
 
+      // A canvas view: nothing here is addressable as DOM, so it is only
+      // reachable through the coordinate verbs (mouse, drag, key).
+      function renderGame() {
+        view.innerHTML = `
+          <h1>Game</h1>
+          <canvas id="game" data-testid="game-canvas" width="400" height="300"></canvas>
+          <p data-testid="game-hint">Click to drop a target, drag the square, w/a/s/d or arrows to move.</p>`;
+
+        const canvas = view.querySelector("#game");
+        const ctx = canvas.getContext("2d");
+        const state = { player: { x: 50, y: 50 }, targets: [], keys: {} };
+        // Live object: tests read positions straight off it via bx js.
+        window.__game = state;
+
+        const MOVE_KEYS = ["w", "a", "s", "d", "arrowup", "arrowleft", "arrowdown", "arrowright"];
+        const clamp = (n, max) => Math.max(0, Math.min(max, n));
+        const at = (e) => {
+          const r = canvas.getBoundingClientRect();
+          return { x: e.clientX - r.left, y: e.clientY - r.top };
+        };
+
+        let dragging = false;
+        let dragged = false;
+
+        canvas.addEventListener("mousedown", (e) => {
+          const p = at(e);
+          if (Math.hypot(p.x - state.player.x, p.y - state.player.y) <= 15) {
+            dragging = true;
+            dragged = true;
+          }
+        });
+        canvas.addEventListener("mousemove", (e) => {
+          if (!dragging) return;
+          const p = at(e);
+          state.player.x = clamp(p.x, canvas.width);
+          state.player.y = clamp(p.y, canvas.height);
+        });
+        canvas.addEventListener("mouseup", () => {
+          dragging = false;
+        });
+        canvas.addEventListener("click", (e) => {
+          // A drag ends with a click event too; that one is not a new target.
+          if (dragged) {
+            dragged = false;
+            return;
+          }
+          state.targets.push(at(e));
+        });
+
+        // Held keys drive the loop below. Both listeners retire themselves once
+        // another view has taken over, so navigating away stops the game.
+        function onKey(e) {
+          if (window.__game !== state) {
+            window.removeEventListener("keydown", onKey);
+            window.removeEventListener("keyup", onKey);
+            return;
+          }
+          const k = e.key.toLowerCase();
+          if (!MOVE_KEYS.includes(k)) return;
+          state.keys[k] = e.type === "keydown";
+          e.preventDefault();
+        }
+        window.addEventListener("keydown", onKey);
+        window.addEventListener("keyup", onKey);
+
+        function frame() {
+          if (window.__game !== state) return;
+          const k = state.keys;
+          const dx = (k.a || k.arrowleft ? -1 : 0) + (k.d || k.arrowright ? 1 : 0);
+          const dy = (k.w || k.arrowup ? -1 : 0) + (k.s || k.arrowdown ? 1 : 0);
+          state.player.x = clamp(state.player.x + dx * 2, canvas.width);
+          state.player.y = clamp(state.player.y + dy * 2, canvas.height);
+
+          ctx.fillStyle = "#111418";
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.fillStyle = "#6ea8fe";
+          for (const t of state.targets) {
+            ctx.beginPath();
+            ctx.arc(t.x, t.y, 4, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          ctx.fillStyle = "#f5c451";
+          ctx.fillRect(state.player.x - 8, state.player.y - 8, 16, 16);
+          requestAnimationFrame(frame);
+        }
+        frame();
+      }
+
       function render() {
         document.body.classList.toggle("dark", localStorage.getItem(DARK_KEY) === "1");
         const route = location.hash || (authed() ? "#/tasks" : "#/login");
@@ -283,6 +372,7 @@
         renderNav();
         if (route === "#/tasks") renderTasks();
         else if (route === "#/settings") renderSettings();
+        else if (route === "#/game") renderGame();
         else renderLogin();
       }
 

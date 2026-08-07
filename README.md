@@ -119,8 +119,33 @@ the first failure it escalates once to Sonnet, which is better at repair and
 indirection; the tier that produced the result is reported. What comes back is a
 short structured report — pass/fail, one-paragraph summary, evidence lines,
 turns, token usage — not a transcript. With `--save <name>` the actions actually
-taken are synthesized into `flows/<name>.flow.ts` using replay-stable targets
-(testids and accessible names, never refs), so the next run is deterministic.
+taken AND the assertions that passed are synthesized into
+`flows/<name>.flow.ts` using replay-stable targets (testids and accessible
+names, never refs), so the next run is deterministic.
+
+**Fan out freely.** Every agent run is pinned to its own browser tab with its
+own element-ref registry — concurrent agents cannot navigate or scan each
+other's pages, and your own `bx` commands (which use the active tab) don't
+collide with them either. Measured on a real production app: 5 concurrent
+agents, 7/7 task correctness, $0.02–0.06 per task on Haiku.
+
+## Canvas and games
+
+When there's no DOM to target — canvas games, charts, drag-and-drop — drive by
+coordinates. With `--in <target>` the coordinates are relative to that
+element's top-left, so positions mean "inside the canvas" at any window size:
+
+```bash
+bx mouse click 200 150 --in "game-canvas"   # also dblclick, move, down, up
+bx drag 50 50 300 200 --in "game-canvas"    # mousedown → interpolated moves → mouseup
+bx key down w                               # hold a key…
+bx wait 500
+bx key up w                                 # …WASD movement, charge attacks, etc.
+bx wheel -120 --in "game-canvas"            # scroll / zoom
+```
+
+All four log to the action log, synthesize into flows, and are available to
+`bx agent` — pair them with `bx js` to read whatever state the game exposes.
 
 ## Recording
 
@@ -163,8 +188,20 @@ running, `bx profiles` lists them, `bx stop` shuts the current one down.
 | `~/.bx/snaps/` | screenshots from `bx snap` |
 
 Add `--headless` for CI (decided per daemon, at start), `--json` for machine
-output, `--timeout <ms>` to override the 5000ms default on click, fill, select,
-wait and expect. `bx help` prints the full verb list.
+output (includes an `ms` wall-time field), `--timeout <ms>` to override the
+5000ms default on click, fill, select, wait and expect. `BX_TIMING=1` prints
+each command's wall time to stderr. `bx help` prints the full verb list.
+
+Artifacts: `flows/*.flow.ts` are project files — commit them like tests.
+`recordings/` is bulky — add it to your project's `.gitignore`.
+
+## Windows / Git Bash
+
+Git Bash (MSYS) rewrites `/`-leading arguments into Windows paths before any
+program sees them — `bx expect url "/portal"` would arrive as
+`C:/Program Files/Git/portal`. bx detects and repairs this automatically (it
+strips the exact MSYS prefix back off). If an argument still looks mangled,
+prefix the command with `MSYS_NO_PATHCONV=1`.
 
 ## Architecture
 
@@ -189,3 +226,5 @@ that drives your real daily-driver Chrome profiles from inside the browser
 (Chrome 136+ blocks CDP on the default user-data-dir, and app-bound encryption
 blocks cookie import, so an extension is the only route). See
 [`decisions.md`](decisions.md).
+
+Site: [bx.dested.com](https://bx.dested.com) (source under [`site/`](site/)).

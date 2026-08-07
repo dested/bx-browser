@@ -2,6 +2,7 @@
 // print a one-line verdict. On failure, surface the console errors that most
 // often explain it.
 
+import { plugin } from "bun";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { CliError, cmd, formatConsoleEntry } from "../client.ts";
@@ -10,6 +11,44 @@ import { FlowAssertionError, FlowContext } from "./api.ts";
 import type { Flow } from "./api.ts";
 
 const FAILURE_CONSOLE_LINES = 5;
+
+// Flow files live in the user's project, where "bx/flow" (this package's
+// exports map) does not resolve. Bun's runtime onResolve hook never sees bare
+// specifiers (verified on 1.3.10 — only relative ones reach it), so the alias
+// is applied when the flow module is loaded: its "bx/flow" import is rewritten
+// to this file's sibling api.ts. Bun-only, which is how the CLI always runs.
+const FLOW_API_PATH = path.join(import.meta.dir, "api.ts");
+const FLOW_SPECIFIER = /(\bfrom\s*|\bimport\s*\(\s*)(["'])bx\/flow\2/g;
+const LOADERS: Record<string, "ts" | "tsx" | "js" | "jsx"> = {
+  ".ts": "ts", ".mts": "ts", ".cts": "ts", ".tsx": "tsx",
+  ".js": "js", ".mjs": "js", ".cjs": "js", ".jsx": "jsx",
+};
+const aliased = new Set<string>();
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[\\^$*+?.()|[\]{}]/g, "\\$&");
+}
+
+// Registered per flow file so the hook never intercepts unrelated modules —
+// an onLoad hook must return contents for everything its filter matches.
+export function aliasFlowImport(abs: string): void {
+  if (aliased.has(abs)) return;
+  aliased.add(abs);
+  const loader = LOADERS[path.extname(abs).toLowerCase()] ?? "ts";
+  plugin({
+    name: "bx-flow-alias",
+    setup(build) {
+      build.onLoad({ filter: new RegExp(`^${escapeRegExp(abs)}$`) }, async (args) => {
+        const source = await Bun.file(args.path).text();
+        const contents = source.replace(
+          FLOW_SPECIFIER,
+          (_match, lead: string) => `${lead}${JSON.stringify(FLOW_API_PATH)}`,
+        );
+        return { contents, loader };
+      });
+    },
+  });
+}
 
 function isFlow(value: unknown): value is Flow {
   if (typeof value !== "object" || value === null) return false;
@@ -34,6 +73,7 @@ export async function runFlow(
   opts: { profile: string; record: boolean },
 ): Promise<boolean> {
   const abs = path.resolve(process.cwd(), file);
+  aliasFlowImport(abs);
   const mod: unknown = await import(pathToFileURL(abs).href);
   const flow = typeof mod === "object" && mod !== null ? Reflect.get(mod, "default") : undefined;
   if (!isFlow(flow)) {

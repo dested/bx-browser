@@ -155,6 +155,14 @@ async function dispatch(cmd: Cmd): Promise<unknown> {
       return session.back(cmd);
     case "reload":
       return session.reload(cmd);
+    case "mouse":
+      return session.mouse(cmd);
+    case "drag":
+      return session.drag(cmd);
+    case "key":
+      return session.key(cmd);
+    case "wheel":
+      return session.wheel(cmd);
     case "tabs":
       return session.tabs();
     case "tabNew":

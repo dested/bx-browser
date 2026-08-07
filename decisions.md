@@ -2,6 +2,31 @@
 
 Newest first. Append-only; supersede, never delete.
 
+## 2026-08-06 — Concurrency = tab pinning with per-page ref registries
+
+**Why:** A real-app shakedown ran 5 concurrent `bx agent`s and inferred an
+isolation guarantee that didn't exist — all commands hit the single active
+tab; results stayed coherent only because Haiku's open→read pairs are
+adjacent. Made it real: stable per-page ids, optional `tab` field on
+page-scoped commands, per-page ref registries/generations; every agent run
+creates and pins its own tab and closes it on exit. Unpinned commands (the
+human CLI) keep active-tab semantics.
+**Rejected:** serializing agent runs (kills the fan-out value); documenting
+the race as a caveat (a guarantee people rely on must be enforced).
+
+## 2026-08-06 — "bx/flow" resolves via an entry-file onLoad rewrite
+
+**Why:** Flow files import "bx/flow", unresolvable outside this repo. The
+obvious fix — Bun `onResolve` aliasing the bare specifier — does not work:
+on Bun 1.3.10 runtime plugins never receive bare specifiers (verified with a
+catch-all filter). Instead `bx run` registers an onLoad hook filtered to the
+exact flow file path and rewrites the quoted specifier to src/flows/api.ts.
+Scoped per-file because onLoad must return contents for everything it
+matches. Limitation: helper modules importing "bx/flow" are not aliased —
+flows are single-file by design.
+**Rejected:** onResolve (broken for bare specifiers), emitting absolute
+import paths at synthesis time (machine-specific artifacts).
+
 ## 2026-08-06 — Action-log transcript is grafted post-distill, not a Transcriber
 
 **Why:** video-to-prompt's `distill()` only invokes a `transcriber` when the

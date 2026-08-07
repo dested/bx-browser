@@ -61,8 +61,20 @@ tests/smoke.test.ts  10-test live suite (bun test), profile "bxtest"
 - `cmd<T>` trusts the daemon's payload shape — compile-time contract only. If a
   session.ts return shape changes, agent/tools.ts and cli.ts break at runtime
   with no tsc error. Change protocol.ts first, then grep call sites.
-- Refs go stale on every navigation and every els scan (generation counter) —
-  by design. Flows/synthesis never use refs.
+- Refs go stale on navigation and els scans — by design, and per-tab: each page
+  has its own registry/generation (`refsFor(page)`). Flows/synthesis never use
+  refs. Commands honor the optional `tab` pin (stable page id); every agent run
+  is pinned to its own tab — that is the concurrency guarantee.
+- New session command handlers: `runAction(cmd, cmd.tab, perform)` +
+  `pageFor(cmd.tab)` — never `ensurePage()` directly.
+- `bx run`'s "bx/flow" alias rewrites the ENTRY flow file only (Bun onLoad
+  hook); a helper module importing "bx/flow" won't resolve. Flows stay
+  single-file.
+- Git Bash mangles `/`-leading args (MSYS path conversion); cli.ts repairs
+  exact-EXEPATH prefixes in main(). Belt-and-braces: MSYS_NO_PATHCONV=1.
+- Rare under load: Chrome accepts a click (Playwright reports success) but no
+  DOM event fires; vanishes on re-run. Re-run a burst of click-flavored smoke
+  failures before believing them.
 - `video-to-prompt` (git dep) ships no dist; scripts/build-harness.ts builds it
   in place on demand. Durable fix = `prepare` script in that repo (user's).
 - Recording relaunches the browser context twice (video is a context-creation

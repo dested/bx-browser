@@ -38,6 +38,7 @@ import type {
   SnapResult,
   StatusResult,
   TabsResult,
+  Target,
   TextResult,
 } from "./protocol.ts";
 
@@ -71,6 +72,17 @@ Interaction  (<target> = ref number | selector (#, ., [, //, css=, xpath=) | vis
   wait <ms | selector | text>      sleep, or wait for a selector or visible text
   expect <kind> <value>            assert; kind = text | url | visible | not-visible
 
+Canvas / coordinates  (games and non-semantic UIs; with --in <target>, x and y
+are relative to that element's top-left, otherwise to the viewport)
+  mouse <action> <x> <y>           action = click | dblclick | move | down | up
+                                   [--in <target>] [--button left|right|middle]
+  drag <x1> <y1> <x2> <y2>         press, move and release [--in <target>]
+                                   [--steps <n>] (default 10 intermediate moves)
+  key <down|up> <key>              hold or release a key, e.g. w — press is the
+                                   one-shot version
+  wheel <deltaY> [x y]             scroll; x y moves the pointer first
+                                   [--in <target>]
+
 Flows and automation
   run <flow.ts> [--record]         replay a typed flow file (zero model tokens)
   record start <slug>              start recording the session
@@ -89,9 +101,13 @@ Flags
   --timeout <ms>                   override the 5000ms default on click, fill,
                                    select, wait and expect
   --json                           print raw JSON instead of text; exit code unchanged
+  -h, --help                       this text, from anywhere in the command line
 
 Output is token-budgeted at the source: els <= 100 elements / 3200 chars, text
 <= 8000 chars, js <= 4000 chars, console and net <= 30 entries each.
+
+Set BX_TIMING=1 to print each command's wall time to stderr; --json output
+carries the same number as an "ms" field.
 
 Exit codes: 0 ok | 1 command or assertion failed | 2 usage error | 3 daemon or
 browser failure.
@@ -106,6 +122,23 @@ interface Globals {
   // undefined = the user did not ask; adopt whatever daemon is already running.
   headless: boolean | undefined;
   json: boolean;
+}
+
+// MSYS path conversion: Git Bash rewrites a bare `/foo` argument to
+// `<EXEPATH>/foo` before bx ever sees it, corrupting urls, xpath targets and
+// filters. Undo it by stripping that exact prefix back off — nothing else.
+function repairMsysArgs(argv: string[]): string[] {
+  const msystem = process.env.MSYSTEM;
+  const exePath = process.env.EXEPATH;
+  if (msystem === undefined || msystem === "" || exePath === undefined) return argv;
+  const prefix = exePath.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (prefix.length === 0) return argv;
+  const marker = `${prefix.toLowerCase()}/`;
+  return argv.map((arg) => {
+    const normalized = arg.replace(/\\/g, "/");
+    if (!normalized.toLowerCase().startsWith(marker)) return arg;
+    return normalized.slice(prefix.length);
+  });
 }
 
 function extractGlobals(argv: string[]): { globals: Globals; rest: string[] } {
@@ -178,6 +211,42 @@ function expectKind(kind: string): "text" | "url" | "visible" | "notVisible" {
   }
 }
 
+type MouseAction = Extract<Cmd, { cmd: "mouse" }>["action"];
+type MouseButton = NonNullable<Extract<Cmd, { cmd: "mouse" }>["button"]>;
+
+function mouseAction(action: string | undefined): MouseAction {
+  switch (action) {
+    case "click":
+    case "dblclick":
+    case "move":
+    case "down":
+    case "up":
+      return action;
+    default:
+      throw new CliError(2, "usage: bx mouse <click|dblclick|move|down|up> <x> <y>");
+  }
+}
+
+function mouseButton(button: string | undefined): MouseButton | undefined {
+  if (button === undefined) return undefined;
+  if (button === "left" || button === "right" || button === "middle") return button;
+  throw new CliError(2, `unknown button "${button}" — use left | right | middle`);
+}
+
+function coord(raw: string | undefined, usage: string): number {
+  const n = Number(raw);
+  if (raw === undefined || raw === "" || !Number.isFinite(n)) throw new CliError(2, usage);
+  return n;
+}
+
+// `--in` is the element coordinates are measured from; absent means viewport.
+// `where` is the printed suffix, kept alongside so both come from one parse.
+function takeIn(args: string[]): { target: Target | undefined; where: string } {
+  const raw = takeOption(args, "--in");
+  if (raw === undefined) return { target: undefined, where: "" };
+  return { target: parseTarget(raw), where: ` in ${q(raw)}` };
+}
+
 function agentModel(model: string | undefined): AgentModel {
   if (model === undefined || model === "haiku") return "haiku";
   if (model === "sonnet") return "sonnet";
@@ -190,6 +259,30 @@ function agentModel(model: string | undefined): AgentModel {
 
 function out(text: string): void {
   if (text.length > 0) process.stdout.write(`${text}\n`);
+}
+
+// Wall clock for one command: started once parsing is done, read again as each
+// result is printed, so --json and BX_TIMING report the same number.
+let startedAt = 0;
+
+function elapsedMs(): number {
+  return Math.round(performance.now() - startedAt);
+}
+
+// JSON payloads that are objects carry the timing inline; the list-shaped ones
+// (console, net, profiles) stay arrays and print unchanged.
+function printJson(value: unknown): void {
+  const payload =
+    typeof value === "object" && value !== null && !Array.isArray(value)
+      ? { ...value, ms: elapsedMs() }
+      : value;
+  process.stdout.write(`${JSON.stringify(payload)}\n`);
+}
+
+function reportTiming(): void {
+  const flag = process.env.BX_TIMING;
+  if (flag === undefined || flag === "" || flag === "0") return;
+  process.stderr.write(`(${elapsedMs()}ms)\n`);
 }
 
 function exitCodeFor(code: BxError["code"]): number {
@@ -208,7 +301,7 @@ function printError(error: BxError): void {
 
 function emit<T>(g: Globals, res: CmdResult<T>, render: (data: T) => string): number {
   if (g.json) {
-    process.stdout.write(`${JSON.stringify(res.ok ? res.data : res.error)}\n`);
+    printJson(res.ok ? res.data : res.error);
     return res.ok ? 0 : exitCodeFor(res.error.code);
   }
   if (!res.ok) {
@@ -375,10 +468,62 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
       const code = emit(g, res, (d) =>
         d.pass
           ? `✓ expect ${rawKind} ${q(value)}`
-          : `✗ expect ${rawKind} ${q(value)} — ${d.detail}`,
+          : `✗ expect ${rawKind} ${q(value)} — ${d.detail} — --timeout <ms> to adjust`,
       );
       if (code !== 0) return code;
       return res.ok && res.data.pass ? 0 : 1;
+    }
+
+    case "mouse": {
+      const { target, where } = takeIn(args);
+      const button = mouseButton(takeOption(args, "--button"));
+      const usage = "usage: bx mouse <click|dblclick|move|down|up> <x> <y> [--in <target>]";
+      const action = mouseAction(args[0]);
+      const x = coord(args[1], usage);
+      const y = coord(args[2], usage);
+      return send<ActionResult>(g, { cmd: "mouse", action, x, y, in: target, button }, (d) =>
+        formatAction(`mouse ${action}`, `at ${x},${y}${where}`, d),
+      );
+    }
+
+    case "drag": {
+      const { target, where } = takeIn(args);
+      const rawSteps = takeOption(args, "--steps");
+      const usage = "usage: bx drag <x1> <y1> <x2> <y2> [--in <target>] [--steps <n>]";
+      const steps = rawSteps === undefined ? undefined : coord(rawSteps, "--steps takes a number");
+      if (steps !== undefined && (!Number.isInteger(steps) || steps <= 0)) {
+        throw new CliError(2, "--steps takes a positive whole number");
+      }
+      const fromX = coord(args[0], usage);
+      const fromY = coord(args[1], usage);
+      const toX = coord(args[2], usage);
+      const toY = coord(args[3], usage);
+      return send<ActionResult>(g, { cmd: "drag", fromX, fromY, toX, toY, in: target, steps }, (d) =>
+        formatAction("dragged", `${fromX},${fromY} → ${toX},${toY}${where}`, d),
+      );
+    }
+
+    case "key": {
+      const action = args[0];
+      const key = args[1];
+      if ((action !== "down" && action !== "up") || key === undefined) {
+        throw new CliError(2, "usage: bx key <down|up> <key>");
+      }
+      return send<ActionResult>(g, { cmd: "key", action, key }, (d) =>
+        formatAction(`key ${action}`, q(key), d),
+      );
+    }
+
+    case "wheel": {
+      const { target, where } = takeIn(args);
+      const usage = "usage: bx wheel <deltaY> [x y] [--in <target>]";
+      const deltaY = coord(args[0], usage);
+      const hasPoint = args[1] !== undefined;
+      const x = hasPoint ? coord(args[1], usage) : undefined;
+      const y = hasPoint ? coord(args[2], usage) : undefined;
+      return send<ActionResult>(g, { cmd: "wheel", deltaY, x, y, in: target }, (d) =>
+        formatAction("wheel", hasPoint ? `${deltaY} at ${x},${y}${where}` : String(deltaY), d),
+      );
     }
 
     case "snap": {
@@ -512,7 +657,7 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
       const { runAgent } = await import("./agent/driver.ts");
       const report = await runAgent(options);
       if (g.json) {
-        process.stdout.write(`${JSON.stringify(report)}\n`);
+        printJson(report);
       } else {
         out(renderReport(report));
       }
@@ -523,7 +668,7 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
       const run = readRunFile(g.profile);
       if (run === null || !(await isAlive(run))) {
         if (g.json) {
-          process.stdout.write(`${JSON.stringify({ profile: g.profile, running: false })}\n`);
+          printJson({ profile: g.profile, running: false });
         } else {
           out(`no daemon running for profile ${g.profile}`);
         }
@@ -535,7 +680,7 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
     case "profiles": {
       const profiles = listProfiles();
       if (g.json) {
-        process.stdout.write(`${JSON.stringify(profiles)}\n`);
+        printJson(profiles);
         return 0;
       }
       out(
@@ -551,7 +696,7 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
     case "stop": {
       const stopped = await stopDaemon(g.profile);
       if (g.json) {
-        process.stdout.write(`${JSON.stringify({ profile: g.profile, stopped })}\n`);
+        printJson({ profile: g.profile, stopped });
         return 0;
       }
       out(
@@ -575,22 +720,40 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
   }
 }
 
-async function main(argv: string[]): Promise<number> {
-  const { globals, rest } = extractGlobals(argv);
-  const [command, ...args] = rest;
-  if (command === undefined) {
-    process.stdout.write(USAGE);
-    return 0;
-  }
-  return dispatch(globals, command, args);
-}
-
-const exitCode = await main(process.argv.slice(2)).catch((err: unknown) => {
+function reportFailure(err: unknown): number {
   if (err instanceof CliError) {
     process.stderr.write(`✗ ${err.message}\n`);
     return err.exitCode;
   }
   process.stderr.write(`✗ ${err instanceof Error ? err.message : String(err)}\n`);
   return 3;
-});
+}
+
+async function main(argv: string[]): Promise<number> {
+  const raw = repairMsysArgs(argv);
+  // Help is free: it answers before any daemon spawn or verb dispatch.
+  if (raw.some((arg) => arg === "--help" || arg === "-h")) {
+    process.stdout.write(USAGE);
+    return 0;
+  }
+
+  const { globals, rest } = extractGlobals(raw);
+  const [command, ...args] = rest;
+  if (command === undefined) {
+    process.stdout.write(USAGE);
+    return 0;
+  }
+
+  startedAt = performance.now();
+  let code: number;
+  try {
+    code = await dispatch(globals, command, args);
+  } catch (err: unknown) {
+    code = reportFailure(err);
+  }
+  reportTiming();
+  return code;
+}
+
+const exitCode = await main(process.argv.slice(2)).catch(reportFailure);
 process.exit(exitCode);

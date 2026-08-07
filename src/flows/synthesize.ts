@@ -6,6 +6,13 @@ import type { ActionLogEntry, Target } from "../protocol.ts";
 
 const REDACTED_MARK = "•••";
 
+const EXPECT_VERB = {
+  text: "expectText",
+  url: "expectUrl",
+  visible: "expectVisible",
+  notVisible: "expectNotVisible",
+} as const;
+
 function q(s: string): string {
   return JSON.stringify(s);
 }
@@ -18,6 +25,11 @@ function textOf(target: Target): string {
 
 function stable(entry: ActionLogEntry, target: Target): string {
   return entry.stableTarget ?? textOf(target);
+}
+
+/** Trailing options object for the coordinate verbs, omitted when empty. */
+function options(parts: string[]): string {
+  return parts.length === 0 ? "" : `, { ${parts.join(", ")} }`;
 }
 
 function linesFor(entry: ActionLogEntry): string[] {
@@ -48,21 +60,67 @@ function linesFor(entry: ActionLogEntry): string[] {
       return [`await b.press(${q(c.key)});`];
     case "select":
       return [`await b.select(${q(stable(entry, c.target))}, ${q(c.value)});`];
+    case "expect":
+      return [`await b.${EXPECT_VERB[c.kind]}(${q(c.value)});`];
+    case "mouse": {
+      const opts = [
+        ...(c.in ? [`in: ${q(stable(entry, c.in))}`] : []),
+        ...(c.button ? [`button: ${q(c.button)}`] : []),
+      ];
+      return [`await b.mouse(${q(c.action)}, ${c.x}, ${c.y}${options(opts)});`];
+    }
+    case "drag": {
+      const opts = [
+        ...(c.in ? [`in: ${q(stable(entry, c.in))}`] : []),
+        ...(c.steps === undefined ? [] : [`steps: ${c.steps}`]),
+      ];
+      return [`await b.drag(${c.fromX}, ${c.fromY}, ${c.toX}, ${c.toY}${options(opts)});`];
+    }
+    case "key":
+      return [`await b.${c.action === "down" ? "keyDown" : "keyUp"}(${q(c.key)});`];
+    case "wheel": {
+      const opts = [
+        ...(c.x === undefined ? [] : [`x: ${c.x}`]),
+        ...(c.y === undefined ? [] : [`y: ${c.y}`]),
+        ...(c.in ? [`in: ${q(stable(entry, c.in))}`] : []),
+      ];
+      return [`await b.wheel(${c.deltaY}${options(opts)});`];
+    }
     case "back":
       return ["await b.back();"];
     case "reload":
       return ["await b.reload();"];
-    case "tabNew":
-    case "tabSelect":
-    case "tabClose":
-      return ["// (tab change omitted)"];
     default:
       return [];
   }
 }
 
+// Only opens participate in de-duplication, so the url is all synthesizeFlow
+// needs to know about an entry beyond its lines.
+function openUrlOf(entry: ActionLogEntry): string | null {
+  if (entry.cmd !== "open") return null;
+  try {
+    const parsed = CmdSchema.safeParse(JSON.parse(entry.cmdJson));
+    return parsed.success && parsed.data.cmd === "open" ? parsed.data.url : null;
+  } catch {
+    return null;
+  }
+}
+
 export function synthesizeFlow(entries: ActionLogEntry[], name: string): string {
-  const body = entries.flatMap(linesFor).map((line) => `  ${line}`);
+  const body: string[] = [];
+  // An agent run re-opens the same url whenever it re-orients; back-to-back
+  // opens of one url are noise. A later re-open with anything emitted in
+  // between is a real navigation and survives.
+  let lastOpenUrl: string | null = null;
+  for (const entry of entries) {
+    const url = openUrlOf(entry);
+    if (url !== null && url === lastOpenUrl) continue;
+    const lines = linesFor(entry);
+    if (lines.length === 0) continue;
+    lastOpenUrl = url;
+    for (const line of lines) body.push(`  ${line}`);
+  }
   return [
     `// synthesized by bx agent — ${new Date().toISOString()}`,
     `import { flow } from "bx/flow";`,

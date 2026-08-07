@@ -1,17 +1,42 @@
 ---
 name: bx
-description: "Drive, verify, and record web apps through the bx CLI (token-budgeted browser automation). Use INSTEAD of browser MCP tools (claude-in-chrome/computer-use) whenever the task is: open a page, click through a UI, fill forms, verify a fix or behavior, capture console/network errors, record a workflow, or run/author a regression flow. Trigger on: 'open the app', 'click through', 'verify in the browser', 'check the console', 'record this flow', URLs of local dev servers."
+description: "Drive, verify, and record web apps through the bx CLI (token-budgeted browser automation). Use INSTEAD of browser MCP tools (claude-in-chrome/computer-use) whenever the task is: open a page, click through a UI, fill forms, verify a fix or behavior, capture console/network errors, record a workflow, run/author a regression flow, or drive a canvas/game. Trigger on: 'open the app', 'click through', 'verify in the browser', 'check the console', 'record this flow', 'test the game', URLs of local dev servers."
 ---
 
 # bx — browser automation as a CLI
 
 A background daemon owns a real Chrome with a persistent profile (logins survive
-between sessions). Every verb is a plain Bash call against it — no tool schemas,
-no screenshot loop. Output is budgeted at the source (`els` ~800 tokens, `text`
-~2000, console/network 30 entries), so never ration `bx els`. Act on text, not
+between sessions). Every verb is a plain Bash call — no tool schemas, no
+screenshot loop. Output is budgeted at the source (`els` ~800 tokens, `text`
+~2000, console/net 30 entries), so never ration `bx els`. Act on text, not
 pixels; screenshot only when the question is genuinely visual.
 
-## Golden path
+## Reach for `bx agent` FIRST
+
+For anything phrased as a task — "log in and check the invoice list", "add an
+item and verify the total", "click through settings and confirm the toggle
+sticks" — do NOT drive step by step. Delegate:
+
+```bash
+bx agent "log in as demo@acme.test and verify the invoice list loads" --save invoices
+```
+
+- Runs on **Haiku** (one-shot Sonnet escalation on failure) and returns a
+  ~300-token pass/fail report with evidence. Ends with a trailer —
+  `tier=haiku turns=14 wall=25.9s cost=$0.037` — quote it when reporting.
+- Typical real-app task: 10–40 turns, 15–75s, $0.02–0.06. Measured 7/7 correct
+  on a production app.
+- **Fan out freely.** Every agent run is pinned to its own browser tab with its
+  own element refs — concurrent agents cannot interfere with each other or with
+  your own bx commands (which use the active tab). Tested 5-wide; launch
+  independent read/verify tasks in parallel, one Bash call each.
+- `--save <name>` writes the actions AND passing assertions to
+  `flows/<name>.flow.ts` — replayable forever at zero model tokens.
+
+Drive verb-by-verb only for quick single lookups, exploratory poking, or when
+you must see intermediate state yourself.
+
+## Driving by hand
 
 ```bash
 bx open https://myapp.localhost      # navigates, prints title + numbered elements
@@ -21,70 +46,59 @@ bx fill 5 "me@example.com"
 bx expect text "Saved"               # exit 1 if it fails
 ```
 
-Refs are per-scan and go stale by design: after navigation, re-run `bx els`
-before using numbers — or pass text (`bx click "Save changes"`), which survives
-re-renders.
+Refs are per-scan and go stale by design: after navigation, re-run `bx els` —
+or pass text (`bx click "Save changes"`), which survives re-renders.
 
 **Target syntax** (auto-detected): `3` → ref from the last `els`; `#id`,
 `.class`, `[attr]`, `//xpath`, `css=`, `xpath=` → selector; anything else →
-text, matched in order against `data-testid`, role+name, label, placeholder,
-visible text.
-
-## Commands
+text, matched against `data-testid`, role+name, label, placeholder, visible
+text — in that order.
 
 | Verb | Syntax | Notes |
 | --- | --- | --- |
 | open | `bx open <url>` | navigate; prints title + element list |
-| els | `bx els [--all] [--filter <text>]` | numbered interactive elements; `--all` lifts the 100-element cap |
-| click | `bx click <target>` | auto-waits for actionability |
-| fill | `bx fill <target> <value>` | clears then types |
-| select | `bx select <target> <value>` | option value or label |
-| press | `bx press <key>` | `Enter`, `Control+a`, … |
-| wait | `bx wait <text\|selector\|ms>` | number = sleep, else wait until visible |
-| expect | `bx expect text\|url\|visible\|not-visible <value>` | exit code 1 on failure |
-| text | `bx text [selector]` | visible text, ~2000-token cap |
-| console | `bx console [--all] [--filter <re>]` | errors + warnings by default |
-| net | `bx net [--failed] [--filter <re>]` | requests; `--failed` = status ≥ 400 / aborted |
-| snap | `bx snap [path] [--full]` | downscaled PNG under `~/.bx/snaps/`; prints the path |
-| js | `bx js <expression>` | evaluates in the page, returns JSON |
-| nav | `bx back` / `bx reload` | |
+| els | `bx els [--all] [--filter <text>]` | numbered interactive elements |
+| click / fill / select | `bx click <target>` · `bx fill <t> <v>` · `bx select <t> <v>` | auto-wait |
+| press | `bx press <key>` | one-shot key/chord: `Enter`, `Control+a` |
+| wait | `bx wait <text\|selector\|ms>` | number = sleep, else wait visible |
+| expect | `bx expect text\|url\|visible\|not-visible <value>` | exit 1 on fail; `--timeout <ms>` |
+| text / js | `bx text [selector]` · `bx js <expr>` | budgeted reads |
+| console / net | `bx console [--filter <re>]` · `bx net --failed` | errors first |
+| snap | `bx snap [path] [--full]` | downscaled PNG path — `Read` it only if needed |
 | tabs | `bx tabs` / `bx tab <n>` / `bx tab new [url]` / `bx tab close` | |
-| run | `bx run <flow-file> [--record]` | replay a typed flow; zero model tokens |
-| agent | `bx agent "<instruction>" [--model haiku\|sonnet] [--save <name>]` | delegate; returns a short report |
-| record | `bx record start <slug>` / `bx record stop` | video → keyframe package |
+| run | `bx run <flow.ts> [--record]` | replay a flow; zero model tokens |
+| record | `bx record start <slug>` / `bx record stop` | video → narrated package |
 | admin | `bx status` / `bx profiles` / `bx stop` | daemon lifecycle |
 
-Global flags: `--profile <name>` (default `default`), `--headless`, `--json`,
-and `--timeout <ms>` (overrides the 5000ms default on click, fill, select, wait
-and expect). The daemon starts on first use, one per profile.
+Global flags: `--profile <name>` (default `default`), `--headless`, `--json`
+(includes an `ms` timing field), `--timeout <ms>`. `BX_TIMING=1` prints wall
+time to stderr per command. The daemon starts on first use, one per profile.
 
-## Delegate multi-step work
+## Canvas, games, non-semantic UIs
 
-For anything phrased as a natural-language task — "log in and check the invoice
-list loads", "add an item to the cart and verify the total" — **prefer**:
+When there's no DOM to target, use coordinates — element-relative via `--in`
+so positions mean "inside the canvas":
 
 ```bash
-bx agent "log in as demo@acme.test and verify the invoice list loads" --save invoices
+bx mouse click 200 150 --in "game-canvas"   # also: dblclick, move, down, up
+bx drag 50 50 300 200 --in "game-canvas"    # mousedown → moves → mouseup
+bx key down w                               # hold a key (WASD movement)
+bx wait 500
+bx key up w
+bx wheel -120 --in "game-canvas"            # scroll/zoom
 ```
 
-It runs on a cheap model (Haiku, escalating once to Sonnet on failure) and hands
-back a ~300-token pass/fail report with evidence — far cheaper than you issuing
-twenty commands and reading twenty outputs. `--save <name>` writes the actions
-taken to `flows/<name>.flow.ts`, replayable forever at zero token cost via
-`bx run flows/invoices.flow.ts`. Drive step by step yourself only for short
-exploratory poking.
+Pair with `bx js` to read game state the app exposes, and `bx snap` when the
+claim is visual. These log to the action log and synthesize into flows like
+every other verb.
 
-## Verify a fix
+## Verify a fix (the default trio)
 
 ```bash
 bx expect text "Order placed"    # or: expect url /orders/, expect visible ...
 bx console                       # errors + warnings only
 bx net --failed                  # 4xx/5xx/aborted
 ```
-
-That trio is the default verification. Reach for `bx snap` only when the claim
-is about appearance (layout, spacing, a chart) — it prints a path you then
-`Read` as an image.
 
 ## Record a walkthrough
 
@@ -95,14 +109,26 @@ bx record stop
 ```
 
 Produces `recordings/<slug>/`: deduped keyframes, 3×3 contact sheets, and a
-`report.md` narrated by the action log. Point the user at `report.md`; read the
-contact sheets yourself if you need to see what happened.
+`report.md` narrated by the action log (passwords redacted). Point the user at
+`report.md`.
+
+## Artifacts
+
+- `flows/*.flow.ts` — typed regression tests; **commit them** to the project.
+- `recordings/` — bulky; add to the project's `.gitignore`.
+- `~/.bx/` — daemon state, snaps, logs, profiles. Never commit.
 
 ## Notes
 
-- Non-zero exit means failure: 1 = command/expect, 2 = usage, 3 = daemon/browser.
-  Read the error text — unresolved targets list near-matches.
-- If a target won't resolve, run `bx els --filter <word>` rather than guessing.
+- Exit codes: 0 ok · 1 command/expect failed · 2 usage · 3 daemon/browser.
+  Unresolved targets list did-you-mean candidates — read them before retrying.
+- If a target won't resolve, `bx els --filter <word>` beats guessing.
+- Git Bash on Windows: bx auto-repairs MSYS path mangling of `/`-leading args
+  (`expect url "/portal"` is safe). If something still looks rewritten, prefix
+  the command with `MSYS_NO_PATHCONV=1`.
 - First run of a profile: the user signs in once by hand; state persists.
+- A failing `expect` waits its full timeout (default 5s) — pass `--timeout 500`
+  when probing for absence.
 
-Install: copy this folder to `~/.claude/skills/bx/`.
+Install: copy this folder to `~/.claude/skills/bx/`; `bun link` in the repo
+puts `bx` on PATH.

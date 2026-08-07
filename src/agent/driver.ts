@@ -75,7 +75,9 @@ async function runAttempt(
     },
   };
 
-  const server = createBxTools(opts.profile, sink);
+  // Each attempt drives its own tab, so an escalation starts in a fresh page
+  // and two concurrent runs never share one.
+  const tools = createBxTools(opts.profile, sink);
 
   const prompt =
     priorSummary === null
@@ -84,7 +86,7 @@ async function runAttempt(
 
   const options: Options = {
     model: MODEL_IDS[tier],
-    mcpServers: { [BX_SERVER_NAME]: server },
+    mcpServers: { [BX_SERVER_NAME]: tools.server },
     // `tools: []` drops every built-in (Bash, Read, Edit, WebFetch…); the MCP
     // tools come in via mcpServers and are unaffected. `allowedTools` then
     // auto-approves the bx tools so nothing waits on a permission prompt.
@@ -120,6 +122,10 @@ async function runAttempt(
     if (box.report === null) {
       box.report = { status: "fail", summary: `agent run errored: ${message}`, evidence: [] };
     }
+  } finally {
+    // A failed attempt must not leak its tab, and a dead daemon must not turn
+    // cleanup into the run's outcome.
+    await tools.close().catch(() => undefined);
   }
 
   return { tier, report: box.report, turns, usage };

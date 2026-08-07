@@ -49,6 +49,23 @@ interface Resolved {
   stable: string;
 }
 
+/** Viewport point the coordinate verbs offset from; `stable` names the `in`. */
+interface Origin {
+  x: number;
+  y: number;
+  stable?: string;
+}
+
+/**
+ * One page's refs. Scoped per page because concurrent pinned callers each scan
+ * their own tab: a single registry would let every els clobber every other
+ * caller's refs, and a navigation in one tab would stale refs in all of them.
+ */
+interface PageRefs {
+  generation: number;
+  entries: Map<number, RefEntry>;
+}
+
 const SETTLE_MS = 150;
 const HAS_SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i;
 const OPAQUE_SCHEME = /^(about|data|file|chrome|blob):/i;
@@ -88,8 +105,9 @@ export class Session {
   private readonly snapsDir: string;
   private context: BrowserContext | null = null;
   private activeIndex = 0;
-  private readonly registry = new Map<number, RefEntry>();
-  private generation = 0;
+  private nextPageId = 1;
+  private readonly pageIds = new WeakMap<Page, number>();
+  private readonly refs = new Map<number, PageRefs>();
   private readonly actions: ActionLogEntry[] = [];
   private readonly buffers: Buffers;
   private readonly startedAt = Date.now();
@@ -142,8 +160,10 @@ export class Session {
   }
 
   private track(page: Page): void {
+    const id = this.pageId(page);
     attachObservers(page, this.buffers);
     page.on("close", () => {
+      this.refs.delete(id);
       const count = this.context?.pages().length ?? 0;
       if (this.activeIndex >= count) this.activeIndex = Math.max(0, count - 1);
     });
@@ -162,6 +182,19 @@ export class Session {
     return page;
   }
 
+  /**
+   * Routing for every command that accepts a `tab` pin: pinned commands act on
+   * their own page no matter which tab is active, so concurrent callers cannot
+   * pull the page out from under each other.
+   */
+  private async pageFor(tab?: number): Promise<Page> {
+    if (tab === undefined) return this.ensurePage();
+    const context = await this.ensureContext();
+    const page = context.pages().find((p) => this.pageIds.get(p) === tab);
+    if (!page) throw { code: "no_page", message: `tab ${tab} is closed` };
+    return page;
+  }
+
   async close(): Promise<void> {
     const context = this.context;
     this.context = null;
@@ -172,6 +205,24 @@ export class Session {
   // Page/ref bookkeeping
   // -------------------------------------------------------------------------
 
+  /** Stable id for pinning; ids are never reused within a session. */
+  private pageId(page: Page): number {
+    const known = this.pageIds.get(page);
+    if (known !== undefined) return known;
+    const id = this.nextPageId++;
+    this.pageIds.set(page, id);
+    return id;
+  }
+
+  private refsFor(page: Page): PageRefs {
+    const id = this.pageId(page);
+    const known = this.refs.get(id);
+    if (known) return known;
+    const fresh: PageRefs = { generation: 0, entries: new Map<number, RefEntry>() };
+    this.refs.set(id, fresh);
+    return fresh;
+  }
+
   private async pageInfo(page: Page): Promise<PageInfo> {
     const pages = this.context?.pages() ?? [];
     const index = pages.indexOf(page);
@@ -181,26 +232,35 @@ export class Session {
     } catch {
       // navigating or closing; the url alone is enough
     }
-    return { index: index < 0 ? 0 : index, url: page.url(), title, active: index === this.activeIndex };
+    return {
+      index: index < 0 ? 0 : index,
+      id: this.pageId(page),
+      url: page.url(),
+      title,
+      active: index === this.activeIndex,
+    };
   }
 
-  /** Fresh scan; bumps the generation and rebuilds the ref registry. */
+  /** Fresh scan; bumps this page's generation and rebuilds its ref registry. */
   private async scan(page: Page): Promise<DistillResult> {
     const result = await distillPage(page);
-    this.generation++;
-    this.register(result);
+    this.refsFor(page).generation++;
+    this.register(page, result);
     return result;
   }
 
-  private register(result: DistillResult): void {
-    this.registry.clear();
+  private register(page: Page, result: DistillResult): void {
+    const refs = this.refsFor(page);
+    refs.entries.clear();
     for (const entry of result.refEntries) {
-      this.registry.set(entry.ref, { ...entry, generation: this.generation });
+      refs.entries.set(entry.ref, { ...entry, generation: refs.generation });
     }
   }
 
   private appendAction(cmd: Cmd, text: string, stableTarget?: string): void {
     const machine: Record<string, unknown> = { ...cmd };
+    // Pinning is a concurrency device; synthesized flows replay single-tab.
+    delete machine.tab;
     const target = machine.target;
     // Refs are session-local; flows must replay in a fresh session.
     if (stableTarget && typeof target === "object" && target !== null && "ref" in target) {
@@ -222,15 +282,16 @@ export class Session {
    */
   private async runAction(
     cmd: Cmd | null,
+    tab: number | undefined,
     perform: (page: Page) => Promise<{ text: string; stableTarget?: string }>,
   ): Promise<ActionResult> {
-    const page = await this.ensurePage();
+    const page = await this.pageFor(tab);
     const urlBefore = page.url();
     const mark = markConsole(this.buffers.console);
     const { text, stableTarget } = await perform(page);
     await sleep(SETTLE_MS);
     const navigated = urlBefore !== page.url();
-    if (navigated) this.generation++;
+    if (navigated) this.refsFor(page).generation++;
     const result: ActionResult = {
       page: await this.pageInfo(page),
       navigated,
@@ -254,11 +315,12 @@ export class Session {
 
   private async resolveTarget(page: Page, target: Target): Promise<Resolved> {
     if ("ref" in target) {
-      const entry = this.registry.get(target.ref);
+      const refs = this.refsFor(page);
+      const entry = refs.entries.get(target.ref);
       if (!entry) {
         throw { code: "target_not_found", message: `ref ${target.ref} is unknown — run bx els` };
       }
-      if (entry.generation !== this.generation) {
+      if (entry.generation !== refs.generation) {
         throw { code: "stale_ref", message: `ref ${target.ref} is stale — re-run bx els` };
       }
       const candidates: Locator[] = [];
@@ -304,6 +366,21 @@ export class Session {
     return { locator, stable: text };
   }
 
+  /**
+   * Where the coordinate verbs measure from. With `in`, x/y are relative to
+   * that element's top-left, so a fixed-size canvas keeps one set of
+   * coordinates wherever the page puts it; without it, the viewport origin.
+   */
+  private async resolveOrigin(page: Page, inTarget?: Target): Promise<Origin> {
+    if (!inTarget) return { x: 0, y: 0 };
+    const { locator, stable } = await this.resolveTarget(page, inTarget);
+    const box = await locator.boundingBox();
+    if (!box) {
+      throw { code: "target_not_found", message: `"${stable}" has no layout box — is it visible?` };
+    }
+    return { x: box.x, y: box.y, stable };
+  }
+
   /** Re-registers at the current generation so the suggested refs are usable. */
   private async nearMatches(page: Page, text: string): Promise<El[]> {
     const words = text
@@ -316,7 +393,7 @@ export class Session {
     } catch {
       return [];
     }
-    this.register(scan);
+    this.register(page, scan);
     return scan.els
       .filter((el) => {
         const haystack = `${el.name} ${el.testid ?? ""} ${el.id ?? ""}`.toLowerCase();
@@ -332,28 +409,27 @@ export class Session {
   async open(cmd: CmdOf<"open">): Promise<OpenResult> {
     const url =
       HAS_SCHEME.test(cmd.url) || OPAQUE_SCHEME.test(cmd.url) ? cmd.url : `https://${cmd.url}`;
-    const page = await this.ensurePage();
+    const page = await this.pageFor(cmd.tab);
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
-    this.generation++;
     const scan = await this.scan(page);
     this.appendAction({ cmd: "open", url }, `opened ${url}`, url);
     return {
       page: await this.pageInfo(page),
-      els: { generation: this.generation, ...renderEls(scan, {}) },
+      els: { generation: this.refsFor(page).generation, ...renderEls(scan, {}) },
     };
   }
 
   async els(cmd: CmdOf<"els">): Promise<ElsResult> {
-    const page = await this.ensurePage();
+    const page = await this.pageFor(cmd.tab);
     const scan = await this.scan(page);
     return {
-      generation: this.generation,
+      generation: this.refsFor(page).generation,
       ...renderEls(scan, { all: cmd.all, filter: cmd.filter }),
     };
   }
 
   async click(cmd: CmdOf<"click">): Promise<ActionResult> {
-    return this.runAction(cmd, async (page) => {
+    return this.runAction(cmd, cmd.tab, async (page) => {
       const { locator, stable } = await this.resolveTarget(page, cmd.target);
       await locator.click({ timeout: cmd.timeoutMs ?? BUDGET.DEFAULT_TIMEOUT_MS });
       return { text: `clicked "${stable}"`, stableTarget: stable };
@@ -361,7 +437,7 @@ export class Session {
   }
 
   async fill(cmd: CmdOf<"fill">): Promise<ActionResult> {
-    return this.runAction(cmd, async (page) => {
+    return this.runAction(cmd, cmd.tab, async (page) => {
       const { locator, stable } = await this.resolveTarget(page, cmd.target);
       const type = await locator.getAttribute("type").catch(() => null);
       await locator.fill(cmd.value, { timeout: cmd.timeoutMs ?? BUDGET.DEFAULT_TIMEOUT_MS });
@@ -371,7 +447,7 @@ export class Session {
   }
 
   async select(cmd: CmdOf<"select">): Promise<ActionResult> {
-    return this.runAction(cmd, async (page) => {
+    return this.runAction(cmd, cmd.tab, async (page) => {
       const { locator, stable } = await this.resolveTarget(page, cmd.target);
       const timeout = cmd.timeoutMs ?? BUDGET.DEFAULT_TIMEOUT_MS;
       try {
@@ -384,7 +460,7 @@ export class Session {
   }
 
   async press(cmd: CmdOf<"press">): Promise<ActionResult> {
-    return this.runAction(cmd, async (page) => {
+    return this.runAction(cmd, cmd.tab, async (page) => {
       await page.keyboard.press(cmd.key);
       return { text: `pressed ${cmd.key}` };
     });
@@ -396,7 +472,7 @@ export class Session {
       throw { code: "bad_request", message: "wait takes exactly one of --text, --selector, --ms" };
     }
     const timeout = cmd.timeoutMs ?? BUDGET.DEFAULT_TIMEOUT_MS;
-    return this.runAction(null, async (page) => {
+    return this.runAction(null, cmd.tab, async (page) => {
       if (cmd.ms !== undefined) {
         await sleep(Math.min(cmd.ms, 30000));
       } else if (cmd.text !== undefined) {
@@ -409,7 +485,18 @@ export class Session {
   }
 
   async expect(cmd: CmdOf<"expect">): Promise<ExpectResult> {
-    const page = await this.ensurePage();
+    const page = await this.pageFor(cmd.tab);
+    const result = await this.evaluateExpect(page, cmd);
+    // Passing assertions are what make a synthesized flow a regression test;
+    // failing ones are exploration noise.
+    if (result.pass) {
+      const kind = cmd.kind === "notVisible" ? "not-visible" : cmd.kind;
+      this.appendAction(cmd, `expect ${kind} "${cmd.value}"`);
+    }
+    return result;
+  }
+
+  private async evaluateExpect(page: Page, cmd: CmdOf<"expect">): Promise<ExpectResult> {
     const timeout = cmd.timeoutMs ?? BUDGET.DEFAULT_TIMEOUT_MS;
 
     if (cmd.kind === "url") {
@@ -452,7 +539,7 @@ export class Session {
   }
 
   async snap(cmd: CmdOf<"snap">): Promise<SnapResult> {
-    const page = await this.ensurePage();
+    const page = await this.pageFor(cmd.tab);
     const original = await page.screenshot({ fullPage: cmd.full === true });
     const viewport = page.viewportSize();
 
@@ -496,7 +583,7 @@ export class Session {
   }
 
   async text(cmd: CmdOf<"text">): Promise<TextResult> {
-    const page = await this.ensurePage();
+    const page = await this.pageFor(cmd.tab);
     const locator = cmd.selector ? page.locator(cmd.selector).first() : page.locator("body");
     const raw = (await locator.innerText()).replace(/\n{3,}/g, "\n\n");
     const truncated = raw.length > BUDGET.TEXT_MAX_CHARS;
@@ -512,7 +599,7 @@ export class Session {
   }
 
   async js(cmd: CmdOf<"js">): Promise<JsResult> {
-    const page = await this.ensurePage();
+    const page = await this.pageFor(cmd.tab);
     const value = await page.evaluate<unknown>(`(async () => (${cmd.expression}))()`);
     const serialized = value === undefined ? "undefined" : (JSON.stringify(value) ?? "undefined");
     const truncated = serialized.length > BUDGET.JS_MAX_CHARS;
@@ -523,18 +610,75 @@ export class Session {
   }
 
   async back(cmd: CmdOf<"back">): Promise<ActionResult> {
-    return this.runAction(cmd, async (page) => {
+    return this.runAction(cmd, cmd.tab, async (page) => {
       await page.goBack({ waitUntil: "domcontentloaded" });
-      this.generation++;
+      this.refsFor(page).generation++;
       return { text: "went back" };
     });
   }
 
   async reload(cmd: CmdOf<"reload">): Promise<ActionResult> {
-    return this.runAction(cmd, async (page) => {
+    return this.runAction(cmd, cmd.tab, async (page) => {
       await page.reload({ waitUntil: "domcontentloaded" });
-      this.generation++;
+      this.refsFor(page).generation++;
       return { text: "reloaded" };
+    });
+  }
+
+  async mouse(cmd: CmdOf<"mouse">): Promise<ActionResult> {
+    return this.runAction(cmd, cmd.tab, async (page) => {
+      const origin = await this.resolveOrigin(page, cmd.in);
+      const x = origin.x + cmd.x;
+      const y = origin.y + cmd.y;
+      const button = cmd.button ?? "left";
+      // Canvases track hover state from mousemove, so every action starts by
+      // putting the pointer where the caller asked for it.
+      await page.mouse.move(x, y);
+      if (cmd.action === "click") await page.mouse.click(x, y, { button });
+      else if (cmd.action === "dblclick") await page.mouse.dblclick(x, y, { button });
+      else if (cmd.action === "down") await page.mouse.down({ button });
+      else if (cmd.action === "up") await page.mouse.up({ button });
+      const where = origin.stable === undefined ? "" : ` in "${origin.stable}"`;
+      return {
+        text: `mouse ${cmd.action} at ${cmd.x},${cmd.y}${where}`,
+        stableTarget: origin.stable,
+      };
+    });
+  }
+
+  async drag(cmd: CmdOf<"drag">): Promise<ActionResult> {
+    return this.runAction(cmd, cmd.tab, async (page) => {
+      const origin = await this.resolveOrigin(page, cmd.in);
+      await page.mouse.move(origin.x + cmd.fromX, origin.y + cmd.fromY);
+      await page.mouse.down();
+      await page.mouse.move(origin.x + cmd.toX, origin.y + cmd.toY, { steps: cmd.steps ?? 10 });
+      await page.mouse.up();
+      const where = origin.stable === undefined ? "" : ` in "${origin.stable}"`;
+      return {
+        text: `dragged ${cmd.fromX},${cmd.fromY} → ${cmd.toX},${cmd.toY}${where}`,
+        stableTarget: origin.stable,
+      };
+    });
+  }
+
+  async key(cmd: CmdOf<"key">): Promise<ActionResult> {
+    return this.runAction(cmd, cmd.tab, async (page) => {
+      if (cmd.action === "down") await page.keyboard.down(cmd.key);
+      else await page.keyboard.up(cmd.key);
+      return { text: `key ${cmd.action} "${cmd.key}"` };
+    });
+  }
+
+  async wheel(cmd: CmdOf<"wheel">): Promise<ActionResult> {
+    return this.runAction(cmd, cmd.tab, async (page) => {
+      let stable: string | undefined;
+      if (cmd.x !== undefined || cmd.y !== undefined) {
+        const origin = await this.resolveOrigin(page, cmd.in);
+        await page.mouse.move(origin.x + (cmd.x ?? 0), origin.y + (cmd.y ?? 0));
+        stable = origin.stable;
+      }
+      await page.mouse.wheel(0, cmd.deltaY);
+      return { text: `wheel ${cmd.deltaY}`, stableTarget: stable };
     });
   }
 
@@ -551,9 +695,11 @@ export class Session {
       const url = HAS_SCHEME.test(cmd.url) || OPAQUE_SCHEME.test(cmd.url) ? cmd.url : `https://${cmd.url}`;
       await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
     }
-    this.generation++;
     this.appendAction(cmd, cmd.url === undefined ? "opened a new tab" : `opened a new tab at ${cmd.url}`);
-    return this.tabs();
+    // `created` is how a pinning caller learns its tab id without racing
+    // whichever tab happens to be active by the time it reads the list.
+    const tabs = await this.tabs();
+    return { ...tabs, created: await this.pageInfo(page) };
   }
 
   async tabSelect(cmd: CmdOf<"tabSelect">): Promise<TabsResult> {
@@ -562,16 +708,18 @@ export class Session {
     if (!page) throw { code: "bad_request", message: `no tab at index ${cmd.index}` };
     this.activeIndex = cmd.index;
     await page.bringToFront().catch(() => undefined);
-    this.generation++;
     this.appendAction(cmd, `selected tab ${cmd.index}`);
     return this.tabs();
   }
 
   async tabClose(cmd: CmdOf<"tabClose">): Promise<TabsResult> {
-    const page = await this.ensurePage();
-    const closed = this.activeIndex;
+    const context = await this.ensureContext();
+    const page = await this.pageFor(cmd.tab);
+    const closed = context.pages().indexOf(page);
     await page.close();
-    this.generation++;
+    // Closing a tab ahead of the active one shifts it down; the active page
+    // itself must not change.
+    if (closed >= 0 && closed < this.activeIndex) this.activeIndex--;
     this.appendAction(cmd, `closed tab ${closed}`);
     return this.tabs();
   }
@@ -661,7 +809,8 @@ export class Session {
         .catch(() => undefined);
     }
     this.activeIndex = 0;
-    // Refs registered against the old context cannot resolve in the new one.
-    this.generation++;
+    // Refs registered against the old context cannot resolve in the new one,
+    // and its page ids are gone with it.
+    this.refs.clear();
   }
 }

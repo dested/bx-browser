@@ -88,26 +88,43 @@ export const BUDGET = {
 // at the daemon boundary.
 // ---------------------------------------------------------------------------
 
+// Optional tab pinning: `tab` is a stable per-page id (assigned at page
+// creation, never reused). A command carrying `tab` acts on that page
+// regardless of which tab is active; without it, the active tab is used —
+// the human CLI never sets it. This is the concurrency contract: each
+// concurrent driver (e.g. every `bx agent` run) works in its own pinned tab,
+// so parallel agents cannot yank pages out from under each other. A pinned
+// command whose tab has been closed fails with code "no_page".
+const tabPin = { tab: z.number().int().nonnegative().optional() };
+
 export const CmdSchema = z.discriminatedUnion("cmd", [
-  z.object({ cmd: z.literal("open"), url: z.string() }),
+  z.object({ cmd: z.literal("open"), url: z.string(), ...tabPin }),
   z.object({
     cmd: z.literal("els"),
     all: z.boolean().optional(),
     filter: z.string().optional(),
+    ...tabPin,
   }),
-  z.object({ cmd: z.literal("click"), target: TargetSchema, timeoutMs: z.number().optional() }),
+  z.object({
+    cmd: z.literal("click"),
+    target: TargetSchema,
+    timeoutMs: z.number().optional(),
+    ...tabPin,
+  }),
   z.object({
     cmd: z.literal("fill"),
     target: TargetSchema,
     value: z.string(),
     timeoutMs: z.number().optional(),
+    ...tabPin,
   }),
-  z.object({ cmd: z.literal("press"), key: z.string() }), // e.g. "Enter", "Control+a"
+  z.object({ cmd: z.literal("press"), key: z.string(), ...tabPin }), // e.g. "Enter", "Control+a"
   z.object({
     cmd: z.literal("select"),
     target: TargetSchema,
     value: z.string(), // option value or label
     timeoutMs: z.number().optional(),
+    ...tabPin,
   }),
   z.object({
     cmd: z.literal("wait"),
@@ -116,15 +133,22 @@ export const CmdSchema = z.discriminatedUnion("cmd", [
     selector: z.string().optional(), // wait until selector visible
     ms: z.number().optional(), // plain sleep
     timeoutMs: z.number().optional(),
+    ...tabPin,
   }),
   z.object({
     cmd: z.literal("expect"),
     kind: z.enum(["text", "url", "visible", "notVisible"]),
     value: z.string(), // text content, url substring, or target text/selector
     timeoutMs: z.number().optional(),
+    ...tabPin,
   }),
-  z.object({ cmd: z.literal("snap"), path: z.string().optional(), full: z.boolean().optional() }),
-  z.object({ cmd: z.literal("text"), selector: z.string().optional() }),
+  z.object({
+    cmd: z.literal("snap"),
+    path: z.string().optional(),
+    full: z.boolean().optional(),
+    ...tabPin,
+  }),
+  z.object({ cmd: z.literal("text"), selector: z.string().optional(), ...tabPin }),
   z.object({
     cmd: z.literal("console"),
     all: z.boolean().optional(), // default: errors + warnings only
@@ -135,13 +159,47 @@ export const CmdSchema = z.discriminatedUnion("cmd", [
     failed: z.boolean().optional(), // only status >= 400 / aborted
     filter: z.string().optional(), // regex source matched against url
   }),
-  z.object({ cmd: z.literal("js"), expression: z.string() }),
-  z.object({ cmd: z.literal("back") }),
-  z.object({ cmd: z.literal("reload") }),
+  z.object({ cmd: z.literal("js"), expression: z.string(), ...tabPin }),
+  z.object({ cmd: z.literal("back"), ...tabPin }),
+  z.object({ cmd: z.literal("reload"), ...tabPin }),
+  // Coordinate interaction (canvas/games/non-semantic UIs). x/y are CSS
+  // pixels. With `in`, coordinates are relative to that element's top-left
+  // (resolution-independent for a fixed-size canvas); without it, viewport
+  // coordinates. All log to the action log and synthesize into flows.
+  z.object({
+    cmd: z.literal("mouse"),
+    action: z.enum(["click", "dblclick", "move", "down", "up"]),
+    x: z.number(),
+    y: z.number(),
+    in: TargetSchema.optional(),
+    button: z.enum(["left", "right", "middle"]).optional(), // default left
+    ...tabPin,
+  }),
+  z.object({
+    cmd: z.literal("drag"),
+    fromX: z.number(),
+    fromY: z.number(),
+    toX: z.number(),
+    toY: z.number(),
+    in: TargetSchema.optional(),
+    steps: z.number().int().positive().optional(), // intermediate mousemove count, default 10
+    ...tabPin,
+  }),
+  // Hold-and-release keys (WASD movement etc.): `key down w` … `key up w`.
+  // One-shot chords stay on `press`.
+  z.object({ cmd: z.literal("key"), action: z.enum(["down", "up"]), key: z.string(), ...tabPin }),
+  z.object({
+    cmd: z.literal("wheel"),
+    deltaY: z.number(),
+    x: z.number().optional(), // move mouse here first; with `in`, element-relative
+    y: z.number().optional(),
+    in: TargetSchema.optional(),
+    ...tabPin,
+  }),
   z.object({ cmd: z.literal("tabs") }),
   z.object({ cmd: z.literal("tabNew"), url: z.string().optional() }),
   z.object({ cmd: z.literal("tabSelect"), index: z.number().int().nonnegative() }),
-  z.object({ cmd: z.literal("tabClose") }),
+  z.object({ cmd: z.literal("tabClose"), ...tabPin }),
   z.object({ cmd: z.literal("recordStart"), slug: z.string().regex(/^[a-z0-9-]+$/) }),
   z.object({ cmd: z.literal("recordStop"), outDir: z.string() }), // absolute dir for the package
   z.object({ cmd: z.literal("status") }),
@@ -177,6 +235,8 @@ export interface BxError {
 
 export interface PageInfo {
   index: number;
+  /** Stable per-page id for tab pinning — assigned at creation, never reused. */
+  id: number;
   url: string;
   title: string;
   active: boolean;
@@ -191,7 +251,7 @@ export interface ElsResult {
   rendered: string; // preformatted lines: `[3] button "Save changes"` — print as-is
 }
 export interface ActionResult {
-  // returned by click/fill/press/select/back/reload/wait/open-less commands
+  // returned by click/fill/press/select/mouse/drag/key/wheel/back/reload/wait
   page: PageInfo;
   navigated: boolean; // url changed as a result of the action
   consoleErrors: string[]; // NEW console errors emitted during the action (max 5)
@@ -214,7 +274,8 @@ export interface NetEntry {
   failed: boolean;
 }
 export interface JsResult { value: string; truncated: boolean } // JSON.stringify'd
-export interface TabsResult { pages: PageInfo[] }
+// created: set by tabNew — the page it made
+export interface TabsResult { pages: PageInfo[]; created?: PageInfo }
 export interface RecordStartResult { slug: string }
 export interface RecordStopResult {
   dir: string; // recordings/<slug>/
@@ -232,8 +293,13 @@ export interface StatusResult {
 }
 
 // Action log: appended for every state-changing command (open, click, fill,
-// press, select, back, reload, tabNew, tabSelect, tabClose). Used for flow
-// synthesis and as the recording "transcript".
+// press, select, mouse, drag, key, wheel, back, reload, tabNew, tabSelect,
+// tabClose) and for every
+// PASSING expect (failing expects are exploration noise and are not logged).
+// Used for flow synthesis and as the recording "transcript" — passing expects
+// are what turn a synthesized flow into a regression test instead of a list
+// of opens. The `tab` pin field is stripped from cmdJson before logging:
+// synthesized flows replay single-tab in a fresh session.
 export interface ActionLogEntry {
   index: number;
   t: number; // ms since daemon start

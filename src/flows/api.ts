@@ -31,6 +31,25 @@ export interface FlowRunEvents {
   onStep(label: string, ms: number): void;
 }
 
+type MouseCmd = Extract<Cmd, { cmd: "mouse" }>;
+export type MouseAction = MouseCmd["action"];
+export type MouseButton = NonNullable<MouseCmd["button"]>;
+
+/** `in`: the element x/y are measured from — same target syntax as click. */
+export interface MouseOptions {
+  in?: string;
+  button?: MouseButton;
+}
+export interface DragOptions {
+  in?: string;
+  steps?: number;
+}
+export interface WheelOptions {
+  x?: number;
+  y?: number;
+  in?: string;
+}
+
 function q(s: string): string {
   return JSON.stringify(s);
 }
@@ -151,6 +170,57 @@ export class FlowContext {
     const label = expression.length > 40 ? `${expression.slice(0, 40)}…` : expression;
     const r = await this.step<JsResult>(`js ${label}`, { cmd: "js", expression });
     return r.value;
+  }
+
+  // Coordinate verbs: for canvases, games and anything else without addressable
+  // DOM. With `in`, x/y are relative to that element's top-left.
+  async mouse(action: MouseAction, x: number, y: number, opts?: MouseOptions): Promise<void> {
+    const where = opts?.in === undefined ? "" : ` in ${q(opts.in)}`;
+    await this.step<ActionResult>(`mouse ${action} ${x},${y}${where}`, {
+      cmd: "mouse",
+      action,
+      x,
+      y,
+      in: opts?.in === undefined ? undefined : parseTarget(opts.in),
+      button: opts?.button,
+    });
+  }
+
+  async drag(
+    fromX: number,
+    fromY: number,
+    toX: number,
+    toY: number,
+    opts?: DragOptions,
+  ): Promise<void> {
+    const where = opts?.in === undefined ? "" : ` in ${q(opts.in)}`;
+    await this.step<ActionResult>(`drag ${fromX},${fromY} → ${toX},${toY}${where}`, {
+      cmd: "drag",
+      fromX,
+      fromY,
+      toX,
+      toY,
+      in: opts?.in === undefined ? undefined : parseTarget(opts.in),
+      steps: opts?.steps,
+    });
+  }
+
+  async keyDown(key: string): Promise<void> {
+    await this.step<ActionResult>(`keyDown ${key}`, { cmd: "key", action: "down", key });
+  }
+
+  async keyUp(key: string): Promise<void> {
+    await this.step<ActionResult>(`keyUp ${key}`, { cmd: "key", action: "up", key });
+  }
+
+  async wheel(deltaY: number, opts?: WheelOptions): Promise<void> {
+    await this.step<ActionResult>(`wheel ${deltaY}`, {
+      cmd: "wheel",
+      deltaY,
+      x: opts?.x,
+      y: opts?.y,
+      in: opts?.in === undefined ? undefined : parseTarget(opts.in),
+    });
   }
 
   async back(): Promise<void> {
