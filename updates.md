@@ -9,8 +9,11 @@ Made agent concurrency a real guarantee: stable tab ids, per-page ref
 registries, every agent pinned to its own tab (closed in finally). Added
 canvas/gamedev verbs (mouse/drag/key/wheel, element-relative via --in) +
 fixture #/game + 3 smoke tests (18/18 green). Rewrote SKILL.md agent-first.
-Built site/ (Vite+React+Tailwind, bx.dested.com) — interactive terminal,
-transcript race, real artifacts. bx linked globally + skill installed.
+Built site/ (Vite+React+Tailwind) — interactive terminal, transcript race
+with live app screens, no-magic artifacts, agent-mode showcase — and DEPLOYED
+to https://bx.dested.com via drydock (project "bx", static/xs, rootDir site;
+drydock owns root Dockerfile/drydock.yaml/.github). bx linked globally +
+skill installed.
 Touched: src/** (protocol, session, daemon, cli, flows, agent), fixtures/,
 tests/, skill/, site/**, README.md
 

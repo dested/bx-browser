@@ -33,7 +33,10 @@ fixtures/app/        "TaskBox" test app served by the daemon at /fixture
 flows/examples/      canonical user-facing flow examples
 skill/SKILL.md       the Claude Code skill (copy to ~/.claude/skills/bx)
 scripts/build-harness.ts  Bun.build bundle of harness.ts (+ self-heals dep dist)
-tests/smoke.test.ts  10-test live suite (bun test), profile "bxtest"
+tests/smoke.test.ts  15-test live suite (bun test), profile "bxtest"
+tests/flows.test.ts  synthesis + bx/flow-alias unit tests (no browser)
+site/                bx.dested.com landing (Vite+React+Tailwind, self-contained)
+Dockerfile, drydock.yaml, .github/  DRYDOCK-MANAGED (portal regenerates — don't hand-edit)
 ```
 
 ## Concept → file
