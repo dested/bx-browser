@@ -1,0 +1,596 @@
+#!/usr/bin/env bun
+// bx — browser automation for Claude Code. Hand-rolled argv parsing: the whole
+// point is a tiny, predictable surface with no dependency weight.
+
+import * as path from "node:path";
+import {
+  CliError,
+  cmd,
+  formatAction,
+  formatConsoleEntry,
+  formatNetEntry,
+  isAlive,
+  isSelectorLike,
+  listProfiles,
+  parseTarget,
+  readRunFile,
+  renderEl,
+  renderPage,
+  stopDaemon,
+} from "./client.ts";
+import { runFlow } from "./flows/runner.ts";
+import type {
+  ActionResult,
+  AgentModel,
+  AgentReport,
+  AgentRunOptions,
+  BxError,
+  Cmd,
+  CmdResult,
+  ConsoleEntry,
+  ElsResult,
+  ExpectResult,
+  JsResult,
+  NetEntry,
+  OpenResult,
+  RecordStartResult,
+  RecordStopResult,
+  SnapResult,
+  StatusResult,
+  TabsResult,
+  TextResult,
+} from "./protocol.ts";
+
+const USAGE = `bx — browser automation for Claude Code
+
+Usage: bx [--profile <name>] [--headless] [--json] <command> [args]
+
+Navigation
+  open <url>                       open a url, then print its interactive elements
+  back                             go back in history
+  reload                           reload the current page
+  tabs                             list open tabs
+  tab <n>                          switch to tab n
+  tab new [url]                    open a new tab
+  tab close                        close the active tab
+
+Observation
+  els [--all] [--filter <text>]    interactive elements as [ref] role "name"
+  text [selector]                  visible text of the page, or of one selector
+  snap [path] [--full]             screenshot, downscaled; --full for whole page
+  console [--all] [--filter <re>]  console entries (errors + warnings by default)
+  net [--failed] [--filter <re>]   network requests
+  js <expression>                  evaluate an expression in the page
+  status                           daemon, browser, tabs and recording state
+
+Interaction  (<target> = ref number | selector (#, ., [, //, css=, xpath=) | visible text)
+  click <target>                   click an element
+  fill <target> <value>            set an input's value
+  press <key>                      press a key, e.g. Enter or Control+a
+  select <target> <value>          choose an option in a <select>
+  wait <ms | selector | text>      sleep, or wait for a selector or visible text
+  expect <kind> <value>            assert; kind = text | url | visible | not-visible
+
+Flows and automation
+  run <flow.ts> [--record]         replay a typed flow file (zero model tokens)
+  record start <slug>              start recording the session
+  record stop                      stop and package it under recordings/<slug>/
+  agent "<instruction>" [--model haiku|sonnet] [--save <name>]
+                                   let a cheap model drive; prints a short report
+
+Daemon
+  profiles                         list profiles and which are running
+  stop                             shut this profile's daemon down
+  help                             this text
+
+Flags
+  --profile <name>                 browser session to use (default: "default")
+  --headless                       launch headless when starting the daemon
+  --timeout <ms>                   override the 5000ms default on click, fill,
+                                   select, wait and expect
+  --json                           print raw JSON instead of text; exit code unchanged
+
+Output is token-budgeted at the source: els <= 100 elements / 3200 chars, text
+<= 8000 chars, js <= 4000 chars, console and net <= 30 entries each.
+
+Exit codes: 0 ok | 1 command or assertion failed | 2 usage error | 3 daemon or
+browser failure.
+`;
+
+// ---------------------------------------------------------------------------
+// argv
+// ---------------------------------------------------------------------------
+
+interface Globals {
+  profile: string;
+  // undefined = the user did not ask; adopt whatever daemon is already running.
+  headless: boolean | undefined;
+  json: boolean;
+}
+
+function extractGlobals(argv: string[]): { globals: Globals; rest: string[] } {
+  const rest: string[] = [];
+  let profile = "default";
+  let headless: boolean | undefined;
+  let json = false;
+
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === undefined) continue;
+    if (arg === "--profile") {
+      const value = argv[i + 1];
+      if (value === undefined) throw new CliError(2, "--profile needs a name");
+      profile = value;
+      i++;
+      continue;
+    }
+    if (arg === "--headless") {
+      headless = true;
+      continue;
+    }
+    if (arg === "--json") {
+      json = true;
+      continue;
+    }
+    rest.push(arg);
+  }
+  return { globals: { profile, headless, json }, rest };
+}
+
+function takeFlag(args: string[], name: string): boolean {
+  const i = args.indexOf(name);
+  if (i === -1) return false;
+  args.splice(i, 1);
+  return true;
+}
+
+function takeOption(args: string[], name: string): string | undefined {
+  const i = args.indexOf(name);
+  if (i === -1) return undefined;
+  const value = args[i + 1];
+  if (value === undefined) throw new CliError(2, `${name} needs a value`);
+  args.splice(i, 2);
+  return value;
+}
+
+function takeTimeout(args: string[]): number | undefined {
+  const value = takeOption(args, "--timeout");
+  if (value === undefined) return undefined;
+  const ms = Number(value);
+  if (!Number.isFinite(ms) || ms <= 0) {
+    throw new CliError(2, "--timeout takes a positive number of milliseconds");
+  }
+  return ms;
+}
+
+function expectKind(kind: string): "text" | "url" | "visible" | "notVisible" {
+  switch (kind) {
+    case "text":
+      return "text";
+    case "url":
+      return "url";
+    case "visible":
+      return "visible";
+    case "not-visible":
+      return "notVisible";
+    default:
+      throw new CliError(2, `unknown expect kind "${kind}" — use text | url | visible | not-visible`);
+  }
+}
+
+function agentModel(model: string | undefined): AgentModel {
+  if (model === undefined || model === "haiku") return "haiku";
+  if (model === "sonnet") return "sonnet";
+  throw new CliError(2, `unknown model "${model}" — use haiku | sonnet`);
+}
+
+// ---------------------------------------------------------------------------
+// output
+// ---------------------------------------------------------------------------
+
+function out(text: string): void {
+  if (text.length > 0) process.stdout.write(`${text}\n`);
+}
+
+function exitCodeFor(code: BxError["code"]): number {
+  if (code === "browser_launch_failed" || code === "internal") return 3;
+  if (code === "bad_request") return 2;
+  return 1;
+}
+
+function printError(error: BxError): void {
+  process.stderr.write(`✗ ${error.code}: ${error.message}\n`);
+  if (error.nearMatches && error.nearMatches.length > 0) {
+    process.stderr.write("did you mean:\n");
+    for (const el of error.nearMatches) process.stderr.write(`  ${renderEl(el)}\n`);
+  }
+}
+
+function emit<T>(g: Globals, res: CmdResult<T>, render: (data: T) => string): number {
+  if (g.json) {
+    process.stdout.write(`${JSON.stringify(res.ok ? res.data : res.error)}\n`);
+    return res.ok ? 0 : exitCodeFor(res.error.code);
+  }
+  if (!res.ok) {
+    printError(res.error);
+    return exitCodeFor(res.error.code);
+  }
+  out(render(res.data));
+  return 0;
+}
+
+async function send<T>(g: Globals, c: Cmd, render: (data: T) => string): Promise<number> {
+  const res = await cmd<T>(g.profile, c, { headless: g.headless });
+  return emit(g, res, render);
+}
+
+function q(s: string): string {
+  return JSON.stringify(s);
+}
+
+// The tab verbs answer with the whole tab list, so confirm the change and then
+// show the new state — that is what the next command needs to act on.
+function renderTabChange(verb: string, detail: string): (data: TabsResult) => string {
+  return (data) => {
+    const head = `✓ ${verb} ${detail}`.trimEnd();
+    return data.pages.length === 0 ? head : `${head}\n${data.pages.map(renderPage).join("\n")}`;
+  };
+}
+
+function renderEls(data: ElsResult): string {
+  const rendered = data.rendered.trim();
+  if (rendered.length === 0) return "(no interactive elements)";
+  return data.truncated ? `${rendered}\n…(${data.total} total, list truncated)` : rendered;
+}
+
+function renderEntries<T>(entries: T[], format: (entry: T) => string): string {
+  if (entries.length === 0) return "(none)";
+  return entries.map(format).join("\n");
+}
+
+function fmtDuration(ms: number): string {
+  const total = Math.round(ms / 1000);
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return minutes > 0 ? `${minutes}m${seconds}s` : `${seconds}s`;
+}
+
+function renderStatus(s: StatusResult): string {
+  const lines = [
+    `profile   ${s.profile}${s.headless ? " (headless)" : ""}`,
+    `browser   ${s.browserRunning ? `running, up ${fmtDuration(s.uptimeMs)}` : "not running"}`,
+    `recording ${s.recording ?? "none"}`,
+    `tabs      ${s.pages.length}`,
+  ];
+  for (const page of s.pages) lines.push(`  ${renderPage(page)}`);
+  return lines.join("\n");
+}
+
+function renderReport(report: AgentReport): string {
+  const lines = [report.status === "pass" ? "✓ PASS" : "✗ FAIL", report.summary];
+  for (const item of report.evidence) lines.push(`  • ${item}`);
+  if (report.savedFlow !== undefined) lines.push(`saved flow → ${report.savedFlow}`);
+  const u = report.usage;
+  lines.push(
+    `tier=${report.tier}${report.escalated ? " (escalated)" : ""} turns=${report.turns} ` +
+      `wall=${(report.wallMs / 1000).toFixed(1)}s tokens=${u.inputTokens}/${u.outputTokens} ` +
+      `(${u.cacheReadTokens} cached) cost=$${u.costUsd === null ? "n/a" : u.costUsd.toFixed(4)}`,
+  );
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// commands
+// ---------------------------------------------------------------------------
+
+async function dispatch(g: Globals, command: string, args: string[]): Promise<number> {
+  switch (command) {
+    case "open": {
+      const url = args[0];
+      if (url === undefined) throw new CliError(2, "usage: bx open <url>");
+      return send<OpenResult>(g, { cmd: "open", url }, (d) =>
+        `✓ ${d.page.title || "(untitled)"} — ${d.page.url}\n\n${renderEls(d.els)}`,
+      );
+    }
+
+    case "els": {
+      const all = takeFlag(args, "--all");
+      const filter = takeOption(args, "--filter");
+      return send<ElsResult>(g, { cmd: "els", all, filter }, renderEls);
+    }
+
+    case "click": {
+      const timeoutMs = takeTimeout(args);
+      const target = args[0];
+      if (target === undefined) throw new CliError(2, "usage: bx click <target>");
+      return send<ActionResult>(
+        g,
+        { cmd: "click", target: parseTarget(target), timeoutMs },
+        (d) => formatAction("clicked", q(target), d),
+      );
+    }
+
+    case "fill": {
+      const timeoutMs = takeTimeout(args);
+      const target = args[0];
+      const value = args[1];
+      if (target === undefined || value === undefined) {
+        throw new CliError(2, "usage: bx fill <target> <value>");
+      }
+      return send<ActionResult>(
+        g,
+        { cmd: "fill", target: parseTarget(target), value, timeoutMs },
+        (d) => formatAction("filled", `${q(target)} with ${q(value)}`, d),
+      );
+    }
+
+    case "press": {
+      const key = args[0];
+      if (key === undefined) throw new CliError(2, "usage: bx press <key>");
+      return send<ActionResult>(g, { cmd: "press", key }, (d) => formatAction("pressed", key, d));
+    }
+
+    case "select": {
+      const timeoutMs = takeTimeout(args);
+      const target = args[0];
+      const value = args[1];
+      if (target === undefined || value === undefined) {
+        throw new CliError(2, "usage: bx select <target> <value>");
+      }
+      return send<ActionResult>(
+        g,
+        { cmd: "select", target: parseTarget(target), value, timeoutMs },
+        (d) => formatAction("selected", `${q(value)} in ${q(target)}`, d),
+      );
+    }
+
+    case "wait": {
+      const timeoutMs = takeTimeout(args);
+      const arg = args[0];
+      if (arg === undefined) throw new CliError(2, "usage: bx wait <ms | selector | text>");
+      const isMs = /^\d+$/.test(arg);
+      const waitCmd: Cmd = isMs
+        ? { cmd: "wait", ms: Number(arg) }
+        : isSelectorLike(arg)
+          ? { cmd: "wait", selector: arg, timeoutMs }
+          : { cmd: "wait", text: arg, timeoutMs };
+      return send<ActionResult>(g, waitCmd, (d) =>
+        formatAction("waited", isMs ? `${arg}ms` : `for ${q(arg)}`, d),
+      );
+    }
+
+    case "expect": {
+      const timeoutMs = takeTimeout(args);
+      const rawKind = args[0];
+      const value = args[1];
+      if (rawKind === undefined || value === undefined) {
+        throw new CliError(2, "usage: bx expect <text|url|visible|not-visible> <value>");
+      }
+      const kind = expectKind(rawKind);
+      const res = await cmd<ExpectResult>(
+        g.profile,
+        { cmd: "expect", kind, value, timeoutMs },
+        { headless: g.headless },
+      );
+      const code = emit(g, res, (d) =>
+        d.pass
+          ? `✓ expect ${rawKind} ${q(value)}`
+          : `✗ expect ${rawKind} ${q(value)} — ${d.detail}`,
+      );
+      if (code !== 0) return code;
+      return res.ok && res.data.pass ? 0 : 1;
+    }
+
+    case "snap": {
+      const full = takeFlag(args, "--full");
+      const raw = args[0];
+      // Resolved here: the daemon's cwd is not the caller's.
+      const target = raw === undefined ? undefined : path.resolve(process.cwd(), raw);
+      return send<SnapResult>(g, { cmd: "snap", path: target, full }, (d) =>
+        `saved ${d.path} (${d.width}x${d.height}, ${Math.max(1, Math.round(d.bytes / 1024))} KB)`,
+      );
+    }
+
+    case "text": {
+      const selector = args[0];
+      return send<TextResult>(g, { cmd: "text", selector }, (d) =>
+        d.truncated ? `${d.text}\n…(truncated)` : d.text,
+      );
+    }
+
+    case "console": {
+      const all = takeFlag(args, "--all");
+      const filter = takeOption(args, "--filter");
+      return send<ConsoleEntry[]>(g, { cmd: "console", all, filter }, (d) =>
+        renderEntries(d, formatConsoleEntry),
+      );
+    }
+
+    case "net": {
+      const failed = takeFlag(args, "--failed");
+      const filter = takeOption(args, "--filter");
+      return send<NetEntry[]>(g, { cmd: "net", failed, filter }, (d) =>
+        renderEntries(d, formatNetEntry),
+      );
+    }
+
+    case "js": {
+      const expression = args.join(" ").trim();
+      if (expression.length === 0) throw new CliError(2, "usage: bx js <expression>");
+      return send<JsResult>(g, { cmd: "js", expression }, (d) =>
+        d.truncated ? `${d.value}\n…(truncated)` : d.value,
+      );
+    }
+
+    case "back":
+      return send<ActionResult>(g, { cmd: "back" }, (d) => formatAction("went back", "", d));
+
+    case "reload":
+      return send<ActionResult>(g, { cmd: "reload" }, (d) => formatAction("reloaded", "", d));
+
+    case "tabs":
+      return send<TabsResult>(g, { cmd: "tabs" }, (d) =>
+        d.pages.length === 0 ? "(no tabs)" : d.pages.map(renderPage).join("\n"),
+      );
+
+    case "tab": {
+      const sub = args[0];
+      if (sub === "new") {
+        const url = args[1];
+        return send<TabsResult>(
+          g,
+          { cmd: "tabNew", url },
+          renderTabChange("opened tab", url === undefined ? "" : url),
+        );
+      }
+      if (sub === "close") {
+        return send<TabsResult>(g, { cmd: "tabClose" }, renderTabChange("closed tab", ""));
+      }
+      if (sub !== undefined && /^\d+$/.test(sub)) {
+        const index = Number(sub);
+        return send<TabsResult>(
+          g,
+          { cmd: "tabSelect", index },
+          renderTabChange("switched to tab", String(index)),
+        );
+      }
+      throw new CliError(2, "usage: bx tab <n> | bx tab new [url] | bx tab close");
+    }
+
+    case "run": {
+      const record = takeFlag(args, "--record");
+      const file = args[0];
+      if (file === undefined) throw new CliError(2, "usage: bx run <flow.ts> [--record]");
+      const passed = await runFlow(file, { profile: g.profile, record });
+      return passed ? 0 : 1;
+    }
+
+    case "record": {
+      const sub = args[0];
+      if (sub === "start") {
+        const slug = args[1];
+        if (slug === undefined) throw new CliError(2, "usage: bx record start <slug>");
+        if (!/^[a-z0-9-]+$/.test(slug)) {
+          throw new CliError(2, `slug must be lowercase letters, digits and dashes: "${slug}"`);
+        }
+        return send<RecordStartResult>(
+          g,
+          { cmd: "recordStart", slug },
+          (d) => `● recording "${d.slug}" — bx record stop to package it`,
+        );
+      }
+      if (sub === "stop") {
+        const status = await cmd<StatusResult>(
+          g.profile,
+          { cmd: "status" },
+          { headless: g.headless },
+        );
+        if (!status.ok) return emit(g, status, renderStatus);
+        const slug = status.data.recording;
+        if (slug === null) throw new CliError(1, "not recording");
+        const outDir = path.resolve(process.cwd(), "recordings", slug);
+        return send<RecordStopResult>(
+          g,
+          { cmd: "recordStop", outDir },
+          (d) => `✓ recorded ${d.actionCount} actions\n  package  ${d.dir}\n  report   ${d.reportPath}`,
+        );
+      }
+      throw new CliError(2, "usage: bx record start <slug> | bx record stop");
+    }
+
+    case "agent": {
+      const model = agentModel(takeOption(args, "--model"));
+      const save = takeOption(args, "--save");
+      const instruction = args.join(" ").trim();
+      if (instruction.length === 0) {
+        throw new CliError(
+          2,
+          'usage: bx agent "<instruction>" [--model haiku|sonnet] [--save <name>]',
+        );
+      }
+      const options: AgentRunOptions = { instruction, profile: g.profile, model, save };
+      const { runAgent } = await import("./agent/driver.ts");
+      const report = await runAgent(options);
+      if (g.json) {
+        process.stdout.write(`${JSON.stringify(report)}\n`);
+      } else {
+        out(renderReport(report));
+      }
+      return report.status === "pass" ? 0 : 1;
+    }
+
+    case "status": {
+      const run = readRunFile(g.profile);
+      if (run === null || !(await isAlive(run))) {
+        if (g.json) {
+          process.stdout.write(`${JSON.stringify({ profile: g.profile, running: false })}\n`);
+        } else {
+          out(`no daemon running for profile ${g.profile}`);
+        }
+        return 0;
+      }
+      return send<StatusResult>(g, { cmd: "status" }, renderStatus);
+    }
+
+    case "profiles": {
+      const profiles = listProfiles();
+      if (g.json) {
+        process.stdout.write(`${JSON.stringify(profiles)}\n`);
+        return 0;
+      }
+      out(
+        profiles.length === 0
+          ? "(no profiles yet — one is created on first use)"
+          : profiles
+              .map((p) => `${p.running ? "●" : "○"} ${p.name} — ${p.running ? "running" : "stopped"}`)
+              .join("\n"),
+      );
+      return 0;
+    }
+
+    case "stop": {
+      const stopped = await stopDaemon(g.profile);
+      if (g.json) {
+        process.stdout.write(`${JSON.stringify({ profile: g.profile, stopped })}\n`);
+        return 0;
+      }
+      out(
+        stopped
+          ? `stopped daemon for profile ${g.profile}`
+          : `no daemon running for profile ${g.profile}`,
+      );
+      return 0;
+    }
+
+    case "help":
+    case "--help":
+    case "-h":
+      process.stdout.write(USAGE);
+      return 0;
+
+    default:
+      process.stderr.write(`unknown command "${command}"\n\n`);
+      process.stderr.write(USAGE);
+      return 2;
+  }
+}
+
+async function main(argv: string[]): Promise<number> {
+  const { globals, rest } = extractGlobals(argv);
+  const [command, ...args] = rest;
+  if (command === undefined) {
+    process.stdout.write(USAGE);
+    return 0;
+  }
+  return dispatch(globals, command, args);
+}
+
+const exitCode = await main(process.argv.slice(2)).catch((err: unknown) => {
+  if (err instanceof CliError) {
+    process.stderr.write(`✗ ${err.message}\n`);
+    return err.exitCode;
+  }
+  process.stderr.write(`✗ ${err instanceof Error ? err.message : String(err)}\n`);
+  return 3;
+});
+process.exit(exitCode);

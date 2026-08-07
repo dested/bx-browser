@@ -2,6 +2,34 @@
 
 Newest first. Append-only; supersede, never delete.
 
+## 2026-08-06 — Daemon runs under Node; everything else under Bun
+
+**Why:** Playwright's default CDP pipe transport uses stdio fds 3/4, which Bun
+on Windows does not wire up — Chrome launches but the handshake times out
+(180s); under Node it connects in ~400ms. The websocket fallback also fails
+under Bun (`node:http` never emits `upgrade` to Playwright's `ws`). The daemon
+(src/daemon/**) is therefore runtime-neutral (node:http/node:fs, zero `Bun.*`),
+spawned as `node daemon.ts` — Node 22.18+ type stripping runs the .ts files
+directly, no build step. Constraint: no non-erasable TS syntax in src/daemon/**
+(no parameter properties, enums, namespaces). CLI, flows, agent driver, bench
+stay on Bun.
+**Rejected:** running the daemon under Bun (CDP pipe broken), connectOverCDP
+websocket bridge under Bun (upgrade event never fires; shimming got the
+handshake but no data), bundling the daemon to JS (adds a build step for no
+gain).
+
+## 2026-08-06 — Self-healing in-place build for the video-to-prompt git dep
+
+**Why:** `github:dested/video-to-prompt` declares `main`/`types` into `dist/`
+but ships only `src/` (no build on git install), so the package is unresolvable
+as installed. `scripts/build-harness.ts` detects a missing dist and runs
+`bun x tsc -p tsconfig.build.json --rootDir src` inside the dep before
+bundling; `skipLibCheck` keeps its emitted declarations out of our strict
+program. Durable fix is a `prepare` script in the video-to-prompt repo.
+**Rejected:** bundling the dep's raw src into our TS program (~25 errors under
+`noUncheckedIndexedAccess`), vendoring the source (drift), publishing to npm
+now (user's call, separate repo).
+
 ## 2026-08-06 — video-to-prompt runs in-browser via harness page
 
 **Why:** `dested/video-to-prompt` is browser-only by design; bx already

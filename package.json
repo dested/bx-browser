@@ -1,0 +1,29 @@
+{
+  "name": "bx",
+  "version": "0.1.0",
+  "description": "Purpose-built browser automation for Claude Code: token-budgeted observation, deterministic replayable flows, cheap-model driving.",
+  "type": "module",
+  "bin": {
+    "bx": "./src/cli.ts"
+  },
+  "exports": {
+    ".": "./src/protocol.ts",
+    "./flow": "./src/flows/api.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build:harness": "bun scripts/build-harness.ts",
+    "bench": "bun src/bench/bench.ts",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.221",
+    "playwright-core": "^1.62.1",
+    "video-to-prompt": "github:dested/video-to-prompt",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "typescript": "^7.0.2"
+  }
+}

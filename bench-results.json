@@ -1,0 +1,71 @@
+{
+  "date": "2026-08-07T00:41:08.475Z",
+  "machine": {
+    "platform": "win32",
+    "cpus": 32,
+    "bun": "1.3.10"
+  },
+  "coldStartMs": 1199.9,
+  "verbs": {
+    "els": {
+      "median": 2.3,
+      "p95": 3.3
+    },
+    "click": {
+      "median": 188,
+      "p95": 221.7
+    },
+    "fill": {
+      "median": 171.6,
+      "p95": 172.7
+    },
+    "snap": {
+      "median": 62.3,
+      "p95": 62.7
+    },
+    "text": {
+      "median": 1.9,
+      "p95": 5.3
+    },
+    "js": {
+      "median": 1.3,
+      "p95": 1.7
+    }
+  },
+  "observation": {
+    "els": {
+      "chars": 169,
+      "estTokens": 42,
+      "elements": 7
+    },
+    "text": {
+      "chars": 69,
+      "estTokens": 17
+    },
+    "rawDomChars": 10255,
+    "rawDomEstTokens": 2564,
+    "snap": {
+      "bytes": 28762,
+      "width": 1024,
+      "height": 640,
+      "estImageTokens": 874
+    }
+  },
+  "flowReplay": {
+    "medianMs": 1196.8,
+    "steps": 9
+  },
+  "agent": {
+    "status": "pass",
+    "tier": "haiku",
+    "escalated": false,
+    "turns": 19,
+    "wallMs": 21035,
+    "usage": {
+      "inputTokens": 31551,
+      "outputTokens": 948,
+      "cacheReadTokens": 0,
+      "costUsd": 0.036912
+    }
+  }
+}

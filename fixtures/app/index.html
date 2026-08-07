@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TaskBox</title>
+    <style>
+      :root {
+        --bg: #ffffff;
+        --fg: #1a1a1a;
+        --muted: #6b7280;
+        --line: #e5e7eb;
+        --accent: #2563eb;
+        --danger: #b91c1c;
+      }
+      body.dark {
+        --bg: #111418;
+        --fg: #e8eaed;
+        --muted: #9aa0a6;
+        --line: #2a2f36;
+        --accent: #6ea8fe;
+        --danger: #f87171;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font: 15px/1.5 system-ui, -apple-system, Segoe UI, sans-serif;
+      }
+      main {
+        max-width: 640px;
+        margin: 0 auto;
+        padding: 32px 20px 64px;
+      }
+      h1 {
+        font-size: 24px;
+        margin: 0 0 20px;
+      }
+      nav {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        padding: 12px 20px;
+        border-bottom: 1px solid var(--line);
+      }
+      nav a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+      nav button {
+        margin-left: auto;
+      }
+      label {
+        display: block;
+        margin-bottom: 4px;
+        color: var(--muted);
+      }
+      input[type="text"],
+      input[type="email"],
+      input[type="password"] {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 8px 10px;
+        margin-bottom: 12px;
+        background: var(--bg);
+        color: var(--fg);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+      }
+      button {
+        padding: 8px 14px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--accent);
+        color: #fff;
+        cursor: pointer;
+      }
+      button.secondary {
+        background: transparent;
+        color: var(--fg);
+      }
+      ul {
+        list-style: none;
+        padding: 0;
+        margin: 16px 0;
+      }
+      li {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 8px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      li span {
+        flex: 1;
+      }
+      [role="alert"] {
+        color: var(--danger);
+        margin-bottom: 12px;
+      }
+      [data-testid="toast"] {
+        margin-top: 16px;
+        padding: 8px 12px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 16px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="nav"></div>
+    <main id="view"></main>
+    <script>
+      const AUTH_KEY = "taskbox.auth";
+      const TASKS_KEY = "taskbox.tasks";
+      const DARK_KEY = "taskbox.dark";
+
+      const authed = () => localStorage.getItem(AUTH_KEY) === "1";
+      const tasks = () => JSON.parse(localStorage.getItem(TASKS_KEY) || "[]");
+      const saveTasks = (list) => localStorage.setItem(TASKS_KEY, JSON.stringify(list));
+
+      const view = document.getElementById("view");
+      const navHost = document.getElementById("nav");
+
+      function renderNav() {
+        if (!authed()) {
+          navHost.innerHTML = "";
+          return;
+        }
+        navHost.innerHTML = `
+          <nav>
+            <a href="#/tasks">Tasks</a>
+            <a href="#/settings">Settings</a>
+            <button class="secondary" data-testid="sign-out">Sign out</button>
+          </nav>`;
+        navHost.querySelector('[data-testid="sign-out"]').addEventListener("click", () => {
+          localStorage.removeItem(AUTH_KEY);
+          location.hash = "#/login";
+        });
+      }
+
+      function renderLogin() {
+        view.innerHTML = `
+          <h1>TaskBox</h1>
+          <div data-testid="login-form">
+            <label for="email">Email</label>
+            <input id="email" data-testid="email" type="email" placeholder="Email" />
+            <label for="password">Password</label>
+            <input id="password" data-testid="password" type="password" placeholder="Password" />
+            <button data-testid="sign-in">Sign in</button>
+          </div>`;
+        view.querySelector('[data-testid="sign-in"]').addEventListener("click", () => {
+          const email = view.querySelector('[data-testid="email"]').value.trim();
+          const password = view.querySelector('[data-testid="password"]').value;
+          if (email === "demo@taskbox.test" && password === "hunter2") {
+            localStorage.setItem(AUTH_KEY, "1");
+            location.hash = "#/tasks";
+            return;
+          }
+          if (!view.querySelector('[data-testid="login-error"]')) {
+            const err = document.createElement("div");
+            err.setAttribute("role", "alert");
+            err.dataset.testid = "login-error";
+            err.textContent = "Invalid credentials";
+            view.querySelector('[data-testid="login-form"]').prepend(err);
+          }
+        });
+      }
+
+      function renderTasks() {
+        view.innerHTML = `
+          <h1>Tasks</h1>
+          <div class="row">
+            <input id="new-task" data-testid="new-task" type="text" placeholder="What needs doing?" />
+            <button data-testid="add-task">Add task</button>
+          </div>
+          <ul data-testid="task-list"></ul>
+          <div class="row">
+            <button class="secondary" data-testid="load-widget">Load slow widget</button>
+            <button class="secondary" data-testid="trigger-error">Trigger error</button>
+          </div>
+          <div id="widget-slot"></div>`;
+
+        const list = view.querySelector('[data-testid="task-list"]');
+        const input = view.querySelector('[data-testid="new-task"]');
+
+        function paint() {
+          list.innerHTML = "";
+          for (const [i, task] of tasks().entries()) {
+            const li = document.createElement("li");
+            const span = document.createElement("span");
+            span.textContent = task;
+            const del = document.createElement("button");
+            del.className = "secondary";
+            del.textContent = "Delete";
+            del.setAttribute("aria-label", `Delete ${task}`);
+            del.addEventListener("click", () => {
+              const next = tasks();
+              next.splice(i, 1);
+              saveTasks(next);
+              paint();
+            });
+            li.append(span, del);
+            list.append(li);
+          }
+        }
+
+        function add() {
+          const value = input.value.trim();
+          if (!value) return;
+          saveTasks([...tasks(), value]);
+          input.value = "";
+          paint();
+        }
+
+        view.querySelector('[data-testid="add-task"]').addEventListener("click", add);
+        input.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") add();
+        });
+
+        view.querySelector('[data-testid="load-widget"]').addEventListener("click", () => {
+          setTimeout(() => {
+            const slot = view.querySelector("#widget-slot");
+            if (!slot || slot.querySelector('[data-testid="widget"]')) return;
+            const widget = document.createElement("div");
+            widget.dataset.testid = "widget";
+            widget.textContent = "Widget loaded";
+            slot.append(widget);
+          }, 1500);
+        });
+
+        view.querySelector('[data-testid="trigger-error"]').addEventListener("click", () => {
+          console.error("TaskBox: simulated failure");
+          fetch("/fixture/missing.json").catch(() => {});
+        });
+
+        paint();
+      }
+
+      function renderSettings() {
+        const dark = localStorage.getItem(DARK_KEY) === "1";
+        view.innerHTML = `
+          <h1>Settings</h1>
+          <div class="row">
+            <input id="dark-mode" data-testid="dark-mode" type="checkbox" ${dark ? "checked" : ""} />
+            <label for="dark-mode">Dark mode</label>
+            <span data-testid="dark-status">Dark mode ${dark ? "on" : "off"}</span>
+          </div>
+          <button data-testid="save-settings">Save</button>
+          <div id="toast-slot"></div>`;
+
+        const checkbox = view.querySelector('[data-testid="dark-mode"]');
+        checkbox.addEventListener("change", () => {
+          document.body.classList.toggle("dark", checkbox.checked);
+          localStorage.setItem(DARK_KEY, checkbox.checked ? "1" : "0");
+          view.querySelector('[data-testid="dark-status"]').textContent =
+            `Dark mode ${checkbox.checked ? "on" : "off"}`;
+        });
+
+        view.querySelector('[data-testid="save-settings"]').addEventListener("click", () => {
+          const slot = view.querySelector("#toast-slot");
+          if (slot.querySelector('[data-testid="toast"]')) return;
+          const toast = document.createElement("div");
+          toast.dataset.testid = "toast";
+          toast.textContent = "Saved";
+          slot.append(toast);
+          setTimeout(() => toast.remove(), 2000);
+        });
+      }
+
+      function render() {
+        document.body.classList.toggle("dark", localStorage.getItem(DARK_KEY) === "1");
+        const route = location.hash || (authed() ? "#/tasks" : "#/login");
+        if (!authed() && route !== "#/login") {
+          location.hash = "#/login";
+          return;
+        }
+        renderNav();
+        if (route === "#/tasks") renderTasks();
+        else if (route === "#/settings") renderSettings();
+        else renderLogin();
+      }
+
+      window.addEventListener("hashchange", render);
+      render();
+    </script>
+  </body>
+</html>
