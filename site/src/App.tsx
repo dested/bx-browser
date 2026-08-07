@@ -2,6 +2,7 @@ import { Hero } from "./components/Hero";
 import { Terminal } from "./components/Terminal";
 import { Artifacts } from "./components/Artifacts";
 import { AgentMode } from "./components/AgentMode";
+import { GameWin } from "./components/GameWin";
 import { Race } from "./components/Race";
 import { Numbers } from "./components/Numbers";
 import { HowItWorks } from "./components/HowItWorks";
@@ -41,6 +42,16 @@ export function App() {
         lede="One instruction in. A verdict out. The drive happens on a model that costs 1/10th of yours."
       >
         <AgentMode />
+      </Section>
+
+      <Section
+        id="game"
+        wide
+        eyebrow="the frontier"
+        title="It won a video game"
+        lede="A real-time canvas game — 60fps, WebGL, no DOM to click. A screenshot agent structurally cannot do this. Here is how bx did."
+      >
+        <GameWin />
       </Section>
 
       <Section

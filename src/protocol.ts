@@ -160,6 +160,20 @@ export const CmdSchema = z.discriminatedUnion("cmd", [
     filter: z.string().optional(), // regex source matched against url
   }),
   z.object({ cmd: z.literal("js"), expression: z.string(), ...tabPin }),
+  // Install an in-page controller and poll a predicate — entirely daemon-side,
+  // zero model turns while it runs. THE primitive for driving real-time games:
+  // `install` runs once (statements; e.g. set the app's per-frame input hook),
+  // then `until` is evaluated every pollMs until truthy or timeoutMs elapses.
+  // Re-issuing drive replaces the controller (install just runs again) — the
+  // cheap-iteration loop for tuning a controller without restarting the game.
+  z.object({
+    cmd: z.literal("drive"),
+    install: z.string(), // JS statements, evaluated once before polling
+    until: z.string(), // JS expression; truthy ends the poll with satisfied=true
+    timeoutMs: z.number().int().positive().optional(), // default 15000
+    pollMs: z.number().int().positive().optional(), // default 500
+    ...tabPin,
+  }),
   z.object({ cmd: z.literal("back"), ...tabPin }),
   z.object({ cmd: z.literal("reload"), ...tabPin }),
   // Coordinate interaction (canvas/games/non-semantic UIs). x/y are CSS
@@ -284,6 +298,15 @@ export interface NetEntry {
   failed: boolean;
 }
 export interface JsResult { value: string; truncated: boolean } // JSON.stringify'd
+export interface DriveResult {
+  satisfied: boolean; // until became truthy before the timeout
+  elapsedMs: number;
+  polls: number; // until evaluations performed
+  // JSON.stringify of the last `until` evaluation (capped at BUDGET.JS_MAX_CHARS);
+  // when every poll threw, the last error message instead.
+  finalValue: string;
+  page: PageInfo;
+}
 // created: set by tabNew — the page it made
 export interface TabsResult { pages: PageInfo[]; created?: PageInfo }
 export interface RecordStartResult { slug: string }
@@ -303,8 +326,8 @@ export interface StatusResult {
 }
 
 // Action log: appended for every state-changing command (open, click, fill,
-// press, select, mouse, drag, key, wheel, back, reload, tabNew, tabSelect,
-// tabClose) and for every
+// press, select, mouse, drag, key, wheel, drive, back, reload, tabNew,
+// tabSelect, tabClose) and for every
 // PASSING expect (failing expects are exploration noise and are not logged).
 // Used for flow synthesis and as the recording "transcript" — passing expects
 // are what turn a synthesized flow into a regression test instead of a list
@@ -324,6 +347,11 @@ export interface ActionLogEntry {
   // present, else its accessible name, else the original selector. Refs never
   // appear here — synthesized flows must survive a fresh session.
   stableTarget?: string;
+  // Stable page id the command acted on. This is what lets a concurrent
+  // consumer (an agent run's fail-report evidence, its flow synthesis) keep
+  // only its own tab's actions out of the shared log. Absent only for
+  // commands with no page (e.g. tabSelect before any page exists).
+  tab?: number;
 }
 export interface ActionLogResult { entries: ActionLogEntry[]; nextIndex: number }
 
@@ -362,6 +390,21 @@ export interface AgentRunOptions {
   /** print a one-line heartbeat (turn · est cost · last action) to stdout
    * every N turns even without --verbose. Default 10; 0 disables. */
   heartbeatTurns?: number;
+  /** open the run's pinned tab here before the model's first turn instead of
+   * about:blank. Required by --enter (the setup JS needs a loaded page).
+   * CLI: --url. */
+  startUrl?: string;
+  /** entry recipe: JS statements evaluated in the pinned tab BEFORE the model's
+   * first turn (and re-run on each escalation rung's fresh tab — in-page state
+   * does not survive a new tab). Kills the entry-discovery cost sink: e.g.
+   * "window.__studio.getState().openProject('id'); window.__studio.getState().setPlaying(true)".
+   * Requires startUrl. CLI: --enter <js>. */
+  enterJs?: string;
+  /** success predicate: JS expression that is truthy exactly when the task is
+   * done. Handed to the model to poll via bx_js, AND verified by the driver
+   * when the model reports pass — a pass whose predicate evaluates falsy is
+   * flipped to fail. CLI: --win <js-expr>. */
+  winExpr?: string;
 }
 
 export interface AgentUsage {
@@ -385,6 +428,11 @@ export interface AgentReport {
   transcriptPath?: string;
   /** how the final rung ended. "report" is the only healthy value. */
   endedBy?: "report" | "turns" | "stall" | "budget" | "wall" | "error";
+  /** the governance estimate, rebased to metered cost at each rung boundary.
+   * On aborted runs this INCLUDES the aborted rung's spend, which `usage.costUsd`
+   * structurally cannot (its result message never arrives) — the trailer prints
+   * both so est-vs-metered is never conflated again. */
+  estUsd?: number;
 }
 
 // ---------------------------------------------------------------------------

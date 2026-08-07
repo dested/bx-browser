@@ -2,6 +2,32 @@
 
 Newest first. Append-only; supersede, never delete.
 
+## 2026-08-07 — Real-time games are driven by in-page controllers, not model turns
+
+**Why:** Round 4 proved a turn-based agent structurally cannot win a 60fps
+game (read→decide→keypress is seconds per decision), while an agent-authored
+controller injected through the app's per-frame hook won for $0.16 — and the
+whole gap between that win and a $0.60 failure was entry discovery, not
+gameplay. So: `drive` is a first-class primitive (install once, poll a
+predicate daemon-side, replace-in-place to iterate at zero model cost) and
+`bx agent` takes the entry recipe (--url/--enter) and win signal (--win) as
+inputs instead of budget-burning discovery. --win is driver-verified before a
+pass is accepted — the model's claim is not the evidence, the predicate is.
+**Rejected:** letting the agent hand-poll via bx_js loops (a turn per poll,
+the exact cost sink drive removes); trusting a model-reported pass when a
+machine-checkable predicate exists.
+
+## 2026-08-07 — Agent trailer reports metered AND estimated cost, rebased per rung
+
+**Why:** "estimator ~3× pessimistic" was mostly a metering gap: an aborted
+rung's spend never gets an SDK result message, so the trailer's metered cost
+under-reported exactly when --budget fired. Est is now rebased to metered
+truth at every completed rung boundary (drift cannot compound), cache writes
+are billed (1.25×), and the trailer prints both `cost=$` and `est=$` — est is
+the number to trust on aborted runs. Live check: est $0.04 vs metered $0.037.
+**Rejected:** trusting per-message estimates across a whole ladder (drifts),
+hiding est once metered exists (conflates the two on aborted runs).
+
 ## 2026-08-07 — Pointer drag mode = press-and-settle timing, not event type
 
 **Why:** The SceneBeans Round 2 hypothesis ("touch-none DnD never sees

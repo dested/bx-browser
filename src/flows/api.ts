@@ -5,6 +5,7 @@ import { cmd, parseTarget } from "../client.ts";
 import type {
   ActionResult,
   Cmd,
+  DriveResult,
   ExpectResult,
   JsResult,
   SnapResult,
@@ -174,6 +175,29 @@ export class FlowContext {
     const label = expression.length > 40 ? `${expression.slice(0, 40)}…` : expression;
     const r = await this.step<JsResult>(`js ${label}`, { cmd: "js", expression });
     return r.value;
+  }
+
+  // Installs an in-page controller once, then polls `until` daemon-side until it
+  // is truthy. A falsy result at the timeout is a flow failure, like an expect.
+  async drive(
+    install: string,
+    until: string,
+    opts?: { timeoutMs?: number; pollMs?: number },
+  ): Promise<void> {
+    const label = until.length > 40 ? `${until.slice(0, 40)}…` : until;
+    const r = await this.step<DriveResult>(`drive until ${label}`, {
+      cmd: "drive",
+      install,
+      until,
+      timeoutMs: opts?.timeoutMs,
+      pollMs: opts?.pollMs,
+    });
+    if (!r.satisfied) {
+      throw new FlowAssertionError(
+        `drive predicate not satisfied after ${r.elapsedMs}ms (${r.polls} polls)` +
+          ` — last value: ${r.finalValue}`,
+      );
+    }
   }
 
   // Coordinate verbs: for canvases, games and anything else without addressable

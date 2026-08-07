@@ -151,6 +151,8 @@ async function dispatch(cmd: Cmd): Promise<unknown> {
       return session.netEntries(cmd);
     case "js":
       return session.js(cmd);
+    case "drive":
+      return session.drive(cmd);
     case "back":
       return session.back(cmd);
     case "reload":

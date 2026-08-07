@@ -28,6 +28,7 @@ import type {
   Cmd,
   CmdResult,
   ConsoleEntry,
+  DriveResult,
   ElsResult,
   ExpectResult,
   JsResult,
@@ -86,6 +87,10 @@ are relative to that element's top-left, otherwise to the viewport)
                                    one-shot version
   wheel <deltaY> [x y]             scroll; x y moves the pointer first
                                    [--in <target>]
+  drive --install "<js>"           install an in-page controller and poll a
+        --until "<expr>"           predicate to truthy — zero model tokens
+                                   [--timeout <ms>] (default 15000)
+                                   [--poll <ms>] (default 500)
 
 Flows and automation
   run <flow.ts> [--record]         replay a typed flow file (zero model tokens)
@@ -95,11 +100,17 @@ Flows and automation
                                    [--model haiku|sonnet|opus] [--opus]
                                    [--save <name>] [--max-turns <n>] [--verbose]
                                    [--budget <usd>] [--max-wall <s>]
+                                   [--url <u>] [--enter <js>] [--win <expr>]
                                    --opus allows one final escalation to Opus 4.8
                                    — complex flows only, ~5× Sonnet cost
                                    --budget/--max-wall abort the run at that
                                    estimated spend or elapsed time and still
                                    print a report
+                                   --url opens the agent's tab there; --enter
+                                   <js> runs once before the first turn (kills
+                                   entry discovery on canvas apps); --win <expr>
+                                   is the success predicate — verified before a
+                                   pass is accepted
 
 Daemon
   profiles                         list profiles and which are running
@@ -269,6 +280,17 @@ function takeDelayMs(args: string[], name: string): number | undefined {
   return ms;
 }
 
+/** Millisecond knobs where 0 is meaningless — drive's timeout and poll cadence. */
+function takePositiveMs(args: string[], name: string): number | undefined {
+  const value = takeOption(args, name);
+  if (value === undefined) return undefined;
+  const ms = Number(value);
+  if (!Number.isInteger(ms) || ms <= 0) {
+    throw new CliError(2, `${name} takes a positive whole number of milliseconds`);
+  }
+  return ms;
+}
+
 function takeMaxTurns(args: string[]): number | undefined {
   const value = takeOption(args, "--max-turns");
   if (value === undefined) return undefined;
@@ -424,7 +446,10 @@ function renderReport(report: AgentReport): string {
   lines.push(
     `tier=${report.tier}${report.escalated ? " (escalated)" : ""}${ended} turns=${report.turns} ` +
       `wall=${(report.wallMs / 1000).toFixed(1)}s tokens=${u.inputTokens}/${u.outputTokens} ` +
-      `(${u.cacheReadTokens} cached) cost=$${u.costUsd === null ? "n/a" : u.costUsd.toFixed(4)}`,
+      `(${u.cacheReadTokens} cached) cost=$${u.costUsd === null ? "n/a" : u.costUsd.toFixed(4)}` +
+      // Both figures, always: on an aborted run the estimate includes the rung
+      // the metered cost structurally cannot see.
+      `${report.estUsd === undefined ? "" : ` est=$${report.estUsd.toFixed(2)}`}`,
   );
   if (report.transcriptPath !== undefined) lines.push(`  transcript ${report.transcriptPath}`);
   return lines.join("\n");
@@ -591,6 +616,29 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
       );
     }
 
+    case "drive": {
+      const usage =
+        'usage: bx drive --install "<js>" --until "<expr>" [--timeout <ms>] [--poll <ms>]';
+      const timeoutMs = takePositiveMs(args, "--timeout");
+      const pollMs = takePositiveMs(args, "--poll");
+      const install = takeOption(args, "--install");
+      const until = takeOption(args, "--until");
+      if (install === undefined || until === undefined) throw new CliError(2, usage);
+      const res = await cmd<DriveResult>(
+        g.profile,
+        { cmd: "drive", install, until, timeoutMs, pollMs },
+        { headless: g.headless },
+      );
+      const code = emit(g, res, (d) =>
+        d.satisfied
+          ? `✓ satisfied after ${(d.elapsedMs / 1000).toFixed(1)}s (${d.polls} polls)`
+          : `✗ not satisfied after ${(d.elapsedMs / 1000).toFixed(1)}s (${d.polls} polls)` +
+            ` — last value: ${d.finalValue}`,
+      );
+      if (code !== 0) return code;
+      return res.ok && res.data.satisfied ? 0 : 1;
+    }
+
     case "snap": {
       const full = takeFlag(args, "--full");
       const raw = args[0];
@@ -716,13 +764,20 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
       const maxWallMs = takeMaxWallMs(args);
       const verbose = takeFlag(args, "--verbose");
       const escalateOpus = takeFlag(args, "--opus");
+      const startUrl = takeOption(args, "--url");
+      const enterJs = takeOption(args, "--enter");
+      const winExpr = takeOption(args, "--win");
+      if (enterJs !== undefined && startUrl === undefined) {
+        throw new CliError(2, "--enter needs --url (the setup JS needs a loaded page to run in)");
+      }
       const instruction = args.join(" ").trim();
       if (instruction.length === 0) {
         throw new CliError(
           2,
           'usage: bx agent "<instruction>" [--model haiku|sonnet|opus] [--opus]' +
             " [--save <name>] [--max-turns <n>] [--verbose]" +
-            " [--budget <usd>] [--max-wall <s>]",
+            " [--budget <usd>] [--max-wall <s>]" +
+            " [--url <u>] [--enter <js>] [--win <expr>]",
         );
       }
       const options: AgentRunOptions = {
@@ -735,6 +790,9 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
         escalateOpus,
         budgetUsd,
         maxWallMs,
+        startUrl,
+        enterJs,
+        winExpr,
         // The heartbeat writes to stdout, which under --json must stay a single
         // parseable document.
         heartbeatTurns: g.json ? 0 : undefined,

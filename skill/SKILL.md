@@ -28,6 +28,10 @@ bx agent "log in as demo@acme.test and verify the invoice list loads" --save inv
 - Runs on **Haiku** (one-shot Sonnet escalation on failure) and returns a
   ~300-token pass/fail report with evidence. Ends with a trailer —
   `tier=haiku turns=14 wall=25.9s cost=$0.037` — quote it when reporting.
+- The trailer prints both `cost=$` (metered) and `est=$` (the governance
+  estimate). On aborted runs `est` includes the aborted rung's spend, which
+  metered cost structurally cannot — so `est` is the number to trust when a run
+  hit `--budget` or `--max-wall`.
 - `--opus` allows one FINAL escalation Sonnet → Opus 4.8. Complex flows only
   (long multi-page journeys, gnarly canvas work) — ~5× Sonnet cost. Don't pass
   it by default; add it when a Sonnet attempt already failed on a task that
@@ -89,7 +93,8 @@ text — in that order.
 | snap | `bx snap [path] [--full]` | downscaled PNG path — `Read` it only if needed |
 | tabs | `bx tabs` / `bx tab <n>` / `bx tab new [url]` / `bx tab close` | |
 | run | `bx run <flow.ts> [--record]` | replay a flow; zero model tokens |
-| agent | `bx agent "<task>" [--model haiku\|sonnet\|opus] [--opus] [--save <n>] [--max-turns <n>] [--budget <usd>] [--max-wall <s>] [--verbose]` | delegate |
+| drive | `bx drive --install "<js>" --until "<expr>" [--timeout <ms>] [--poll <ms>]` | in-page controller + poll; exit 1 on timeout |
+| agent | `bx agent "<task>" [--model haiku\|sonnet\|opus] [--opus] [--save <n>] [--max-turns <n>] [--budget <usd>] [--max-wall <s>] [--url <u>] [--enter <js>] [--win <expr>] [--verbose]` | delegate |
 | record | `bx record start <slug>` / `bx record stop` | video → narrated package |
 | admin | `bx status` / `bx profiles` / `bx stop` | daemon lifecycle |
 
@@ -122,6 +127,43 @@ requires press-and-settle timing (a hold before the first move) — retry with
 Pair with `bx js` to read game state the app exposes, and `bx snap` when the
 claim is visual. These log to the action log and synthesize into flows like
 every other verb.
+
+## Real-time games: the in-page controller pattern
+
+Turn-based play cannot win a real-time game — a read→decide→keypress loop is
+seconds per decision and the game runs at 60fps. Don't try. When the app
+exposes a per-frame input hook, drive it in-page instead:
+
+```bash
+# 1. map state, find the hook, dump ONE sample of the FULL input it accepts
+bx js "Object.keys(window).filter(k => k.startsWith('__'))"
+bx js "window.__play.runner.getInstances().map(i => i.defId)"  # 1-of = hero, N-of = goals/hazards
+
+# 2. install a controller + poll the win signal — zero model tokens during play
+bx drive --install "window.__play.override = (r, gi) => { /* seek goal, avoid hazards */ }" \
+         --until "window.__play.runner.status === 'won'" --timeout 15000 --poll 500
+
+# 3. lost or timed out? revise and re-run bx drive — it replaces the controller in place
+```
+
+Mind the input schema: hooks often accept buttons (jump/flap/fire) as well as
+axes — a joystick-only controller cannot win a game whose lift is a button.
+`bx drive` logs to the action log and synthesizes into flows: "level N still
+winnable" becomes a zero-token regression test.
+
+For `bx agent` on a canvas app, kill the entry-discovery cost sink with the
+new flags — discovery of "how do I open X", not gameplay, is what burns
+budgets:
+
+```bash
+bx agent "win Bee Dodge" --url https://app.localhost \
+  --enter "window.__studio.getState().openProject('proj_x'); window.__studio.getState().setPlaying(true)" \
+  --win "window.__play.runner.status === 'won'" --budget 0.30
+```
+
+`--enter` runs before the model's first turn (and re-runs on each escalation
+rung); `--win` is handed to the model as the success predicate AND verified by
+the driver before a pass is accepted.
 
 ## Verify a fix (the default trio)
 
@@ -160,6 +202,12 @@ Produces `recordings/<slug>/`: deduped keyframes, 3×3 contact sheets, and a
 - First run of a profile: the user signs in once by hand; state persists.
 - A failing `expect` waits its full timeout (default 5s) — pass `--timeout 500`
   when probing for absence.
+- Where bx wins, honestly: on an app that exposes state and hooks — your own
+  instrumented app, the intended audience — bx beats screenshot agents
+  decisively: real state reads, real-time driving via in-page controllers,
+  deterministic verification, at cents. On an opaque third-party canvas with no
+  exposed handles, a vision agent sees pixels and bx does not — hand-drive by
+  coordinates or instrument the app.
 
 Install: copy this folder to `~/.claude/skills/bx/`; `bun link` in the repo
 puts `bx` on PATH.

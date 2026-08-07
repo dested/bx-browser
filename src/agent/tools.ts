@@ -17,6 +17,7 @@ import type {
   Cmd,
   CmdResult,
   ConsoleEntry,
+  DriveResult,
   ElsResult,
   ExpectResult,
   JsResult,
@@ -97,6 +98,8 @@ function toTarget(raw: string): { ok: true; target: Target } | { ok: false; mess
 interface TabPin {
   /** This instance's tab id; undefined only when the daemon could not make one. */
   tab(): Promise<number | undefined>;
+  /** The resolved id, once creation finished; undefined before. Never forces creation. */
+  createdId(): number | undefined;
   close(): Promise<void>;
 }
 
@@ -104,6 +107,7 @@ function createTabPin(profile: string, startUrl?: string): TabPin {
   // Created on first use rather than up front: building the tools must not
   // launch a browser (BX_TOOL_NAMES builds a throwaway set at import time).
   let pending: Promise<number | undefined> | null = null;
+  let created: number | undefined;
   return {
     tab(): Promise<number | undefined> {
       if (pending === null) {
@@ -112,10 +116,14 @@ function createTabPin(profile: string, startUrl?: string): TabPin {
           cmd: "tabNew",
           url: startUrl,
           background: true,
-        }).then((res) => (res.ok ? res.data.created?.id : undefined));
+        }).then((res) => {
+          created = res.ok ? res.data.created?.id : undefined;
+          return created;
+        });
       }
       return pending;
     },
+    createdId: () => created,
     async close(): Promise<void> {
       if (pending === null) return;
       const tab = await pending;
@@ -368,6 +376,37 @@ function buildTools(profile: string, sink: ToolSink, pin: TabPin, track: UrlTrac
       },
     ),
 
+    tool(
+      "bx_drive",
+      "Install a JS controller in the page, then poll a predicate until truthy — entirely in-page, zero turns while it runs. THE way to drive a real-time game: write a controller (e.g. set the app's per-frame input hook), pass the win signal as `until`. Before authoring, dump ONE sample of the FULL input shape the hook accepts — buttons AND axes; a joystick-only controller cannot win a game whose jump/flap is a button. On timeout, revise the controller and call bx_drive again — the new install replaces the old; the game keeps running.",
+      {
+        install: z.string().describe("JS statements run once, e.g. set the per-frame input hook"),
+        until: z
+          .string()
+          .describe("JS expression polled until truthy, e.g. window.__play.runner.status === 'won'"),
+        timeoutMs: z.number().optional().describe("default 15000"),
+        pollMs: z.number().optional().describe("default 500"),
+      },
+      async (args) => {
+        const tab = await pin.tab();
+        const res = await call<DriveResult>(profile, {
+          cmd: "drive",
+          install: args.install,
+          until: args.until,
+          timeoutMs: args.timeoutMs,
+          pollMs: args.pollMs,
+          tab,
+        });
+        if (!res.ok) return say(renderError(res.error));
+        const { satisfied, elapsedMs, polls, finalValue, page } = res.data;
+        track.note(page.url);
+        // A drive that timed out is a result to iterate on, not an error.
+        return say(
+          `${satisfied ? "satisfied" : "NOT satisfied"} after ${elapsedMs}ms (${polls} polls) — last value: ${finalValue}`,
+        );
+      },
+    ),
+
     tool("bx_back", "Go back one entry in history.", {}, async () => {
       const tab = await pin.tab();
       const res = await call<ActionResult>(profile, { cmd: "back", tab });
@@ -479,6 +518,10 @@ export interface BxTools {
   close(): Promise<void>;
   /** The last page this run reached — a start URL for the rung after it. */
   lastUrl(): string | undefined;
+  /** This run's tab id once it exists; what scopes the shared action log to this run. */
+  tabId(): number | undefined;
+  /** Evaluates JS in this run's tab — the driver's own channel for --enter and --win. */
+  runJs(expression: string): Promise<{ ok: boolean; value: string }>;
 }
 
 /** `startUrl` opens this run's tab there instead of about:blank. */
@@ -496,5 +539,11 @@ export function createBxTools(profile: string, sink: ToolSink, startUrl?: string
     }),
     close: () => pin.close(),
     lastUrl: () => track.last(),
+    tabId: () => pin.createdId(),
+    async runJs(expression: string): Promise<{ ok: boolean; value: string }> {
+      const tab = await pin.tab();
+      const res = await call<JsResult>(profile, { cmd: "js", expression, tab });
+      return res.ok ? { ok: true, value: res.data.value } : { ok: false, value: res.error.message };
+    },
   };
 }

@@ -14,9 +14,11 @@ import { cmd, ensureDaemon, stopDaemon } from "../src/client.ts";
 import { runFlow } from "../src/flows/runner.ts";
 import { BUDGET } from "../src/protocol.ts";
 import type {
+  ActionLogResult,
   ActionResult,
   CmdResult,
   ConsoleEntry,
+  DriveResult,
   El,
   ElsResult,
   ExpectResult,
@@ -574,6 +576,83 @@ test(
 
     ok(await cmd<TabsResult>(PROFILE, { cmd: "tabClose", tab: created.id }), "close background tab");
     expect(await activeId("tabs after tabClose")).toBe(before);
+  },
+  TIMEOUT,
+);
+
+// ---------------------------------------------------------------------------
+// drive: the daemon-side install-then-poll loop, and the tab id every action
+// log entry carries so concurrent drivers can tell their own actions apart.
+// ---------------------------------------------------------------------------
+
+test(
+  "drive installs a controller and satisfies the predicate",
+  async () => {
+    ok(await cmd<OpenResult>(PROFILE, { cmd: "open", url: `${fixture}#/game` }), "open game");
+
+    const r = await cmd<DriveResult>(PROFILE, {
+      cmd: "drive",
+      install: "window.__driveN = 0; window.__driveT = setInterval(() => { window.__driveN += 1 }, 50)",
+      until: "window.__driveN >= 3",
+      pollMs: 100,
+      timeoutMs: 5000,
+    });
+    const drive = ok(r, "drive until __driveN >= 3");
+
+    expect(drive.satisfied).toBe(true);
+    expect(drive.polls).toBeGreaterThanOrEqual(1);
+    expect(drive.elapsedMs).toBeLessThan(5000);
+
+    ok(
+      await cmd<JsResult>(PROFILE, { cmd: "js", expression: "clearInterval(window.__driveT)" }),
+      "clear the drive interval",
+    );
+  },
+  TIMEOUT,
+);
+
+test(
+  "drive timeout returns satisfied false with the last value",
+  async () => {
+    const r = await cmd<DriveResult>(PROFILE, {
+      cmd: "drive",
+      install: "void 0",
+      until: "false",
+      timeoutMs: 600,
+      pollMs: 200,
+    });
+    // A predicate that never comes true is a result, not a command failure.
+    expect(r.ok).toBe(true);
+    const drive = ok(r, "drive until false");
+
+    expect(drive.satisfied).toBe(false);
+    expect(drive.elapsedMs).toBeGreaterThanOrEqual(600);
+    expect(drive.finalValue).toBe("false");
+  },
+  TIMEOUT,
+);
+
+test(
+  "action log entries carry the acting tab id",
+  async () => {
+    const created = ok(
+      await cmd<TabsResult>(PROFILE, { cmd: "tabNew", background: true }),
+      "tabNew background",
+    ).created;
+    if (!created) throw new Error("tabNew returned no created page");
+
+    ok(
+      await cmd<OpenResult>(PROFILE, { cmd: "open", url: `${fixture}#/tasks`, tab: created.id }),
+      "open in the pinned tab",
+    );
+
+    const log = ok(await cmd<ActionLogResult>(PROFILE, { cmd: "actionLog" }), "actionLog");
+    const opens = log.entries.filter((e) => e.cmd === "open");
+    const last = opens[opens.length - 1];
+    if (!last) throw new Error("the action log holds no open entry");
+    expect(last.tab).toBe(created.id);
+
+    ok(await cmd<TabsResult>(PROFILE, { cmd: "tabClose", tab: created.id }), "close the pinned tab");
   },
   TIMEOUT,
 );

@@ -14,6 +14,7 @@ import {
   type ActionResult,
   type Cmd,
   type ConsoleEntry,
+  type DriveResult,
   type El,
   type ElsResult,
   type ExpectResult,
@@ -270,7 +271,7 @@ export class Session {
     }
   }
 
-  private appendAction(cmd: Cmd, text: string, stableTarget?: string): void {
+  private appendAction(cmd: Cmd, text: string, stableTarget?: string, tab?: number): void {
     const machine: Record<string, unknown> = { ...cmd };
     // Pinning is a concurrency device; synthesized flows replay single-tab.
     delete machine.tab;
@@ -286,6 +287,7 @@ export class Session {
       text,
       cmdJson: JSON.stringify(machine),
       stableTarget,
+      tab,
     });
   }
 
@@ -310,7 +312,7 @@ export class Session {
       navigated,
       consoleErrors: newErrorsSince(this.buffers.console, mark).slice(0, 5),
     };
-    if (cmd) this.appendAction(cmd, text, stableTarget);
+    if (cmd) this.appendAction(cmd, text, stableTarget, this.pageId(page));
     return result;
   }
 
@@ -425,7 +427,7 @@ export class Session {
     const page = await this.pageFor(cmd.tab);
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
     const scan = await this.scan(page);
-    this.appendAction({ cmd: "open", url }, `opened ${url}`, url);
+    this.appendAction({ cmd: "open", url }, `opened ${url}`, url, this.pageId(page));
     return {
       page: await this.pageInfo(page),
       els: { generation: this.refsFor(page).generation, ...renderEls(scan, {}) },
@@ -504,7 +506,7 @@ export class Session {
     // failing ones are exploration noise.
     if (result.pass) {
       const kind = cmd.kind === "notVisible" ? "not-visible" : cmd.kind;
-      this.appendAction(cmd, `expect ${kind} "${cmd.value}"`);
+      this.appendAction(cmd, `expect ${kind} "${cmd.value}"`, undefined, this.pageId(page));
     }
     return result;
   }
@@ -620,6 +622,67 @@ export class Session {
       value: truncated ? serialized.slice(0, BUDGET.JS_MAX_CHARS) : serialized,
       truncated,
     };
+  }
+
+  /**
+   * Install once, then poll `until` daemon-side. The whole loop costs the
+   * caller one command no matter how many polls it takes, which is what makes
+   * driving a real-time game affordable.
+   */
+  async drive(cmd: CmdOf<"drive">): Promise<DriveResult> {
+    const page = await this.pageFor(cmd.tab);
+    try {
+      await page.evaluate(`(async () => { ${cmd.install} })()`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw { code: "internal", message: `drive install threw: ${message}` };
+    }
+
+    const timeoutMs = cmd.timeoutMs ?? 15000;
+    const pollMs = cmd.pollMs ?? 500;
+    const startedAt = Date.now();
+    let satisfied = false;
+    let polls = 0;
+    // A poll that throws leaves its error message as the value: a predicate
+    // that never evaluates is the caller's most useful diagnostic.
+    let finalValue = "undefined";
+    for (;;) {
+      let value: unknown;
+      let threw = false;
+      try {
+        value = await page.evaluate<unknown>(`(async () => (${cmd.until}))()`);
+      } catch (err) {
+        threw = true;
+        finalValue = err instanceof Error ? err.message : String(err);
+      }
+      polls++;
+      if (!threw) {
+        const serialized =
+          value === undefined ? "undefined" : (JSON.stringify(value) ?? "undefined");
+        finalValue =
+          serialized.length > BUDGET.JS_MAX_CHARS
+            ? serialized.slice(0, BUDGET.JS_MAX_CHARS)
+            : serialized;
+        if (value) {
+          satisfied = true;
+          break;
+        }
+      }
+      if (Date.now() - startedAt >= timeoutMs) break;
+      await sleep(pollMs);
+    }
+    const elapsedMs = Date.now() - startedAt;
+
+    // A timed-out drive still ran the controller, so it belongs in the log.
+    const outcome = satisfied ? "satisfied" : "timed out";
+    this.appendAction(
+      cmd,
+      `drove until ${cmd.until.slice(0, 60)} — ${outcome} after ${elapsedMs}ms`,
+      undefined,
+      this.pageId(page),
+    );
+
+    return { satisfied, elapsedMs, polls, finalValue, page: await this.pageInfo(page) };
   }
 
   async back(cmd: CmdOf<"back">): Promise<ActionResult> {
@@ -826,7 +889,12 @@ export class Session {
       await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
     }
     const what = cmd.background === true ? "a new background tab" : "a new tab";
-    this.appendAction(cmd, cmd.url === undefined ? `opened ${what}` : `opened ${what} at ${cmd.url}`);
+    this.appendAction(
+      cmd,
+      cmd.url === undefined ? `opened ${what}` : `opened ${what} at ${cmd.url}`,
+      undefined,
+      this.pageId(page),
+    );
     // `created` is how a pinning caller learns its tab id without racing
     // whichever tab happens to be active by the time it reads the list.
     const tabs = await this.tabs();
@@ -839,7 +907,7 @@ export class Session {
     if (!page) throw { code: "bad_request", message: `no tab at index ${cmd.index}` };
     this.activeIndex = cmd.index;
     await page.bringToFront().catch(() => undefined);
-    this.appendAction(cmd, `selected tab ${cmd.index}`);
+    this.appendAction(cmd, `selected tab ${cmd.index}`, undefined, this.pageId(page));
     return this.tabs();
   }
 
@@ -857,7 +925,7 @@ export class Session {
     const kept = stay && stay !== page ? after.indexOf(stay) : -1;
     if (kept >= 0) this.activeIndex = kept;
     else this.activeIndex = Math.max(0, Math.min(this.activeIndex, after.length - 1));
-    this.appendAction(cmd, `closed tab ${closed}`);
+    this.appendAction(cmd, `closed tab ${closed}`, undefined, this.pageId(page));
     return this.tabs();
   }
 

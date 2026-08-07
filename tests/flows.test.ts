@@ -66,6 +66,26 @@ test("synthesizeFlow maps every expect kind", () => {
   expect(src).toContain(`  await b.expectNotVisible("Spinner");`);
 });
 
+test("synthesizeFlow emits drive with its controller, predicate and options", () => {
+  const src = synthesizeFlow([
+    entry(
+      {
+        cmd: "drive",
+        install: "window.__ctl = () => ({ thrust: 1 });",
+        until: "window.__game.score > 100",
+        timeoutMs: 5000,
+      },
+      "drove until window.__game.score > 100",
+    ),
+  ], "drive the game");
+
+  expect(src).toContain("  await b.drive(");
+  expect(src).toContain(JSON.stringify("window.__ctl = () => ({ thrust: 1 });"));
+  expect(src).toContain(JSON.stringify("window.__game.score > 100"));
+  expect(src).toContain("timeoutMs: 5000");
+  expect(src).not.toContain("pollMs");
+});
+
 test(`"bx/flow" resolves from a flow file outside the repo`, async () => {
   const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "bx-flow-")), "x.flow.ts");
   tmpFiles.push(file);

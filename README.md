@@ -24,6 +24,13 @@ tokens each, all retained in context — and `read_page` accessibility dumps run
 model reads a ~800-token element list, issues one-line commands, and once a path
 works it becomes a flow file that never needs a model again.
 
+Where bx wins, honestly: on an app that exposes state and hooks — your own
+instrumented app, the intended audience — bx beats screenshot agents
+decisively: real state reads, real-time driving via in-page controllers,
+deterministic verification, at cents. On an opaque third-party canvas with no
+exposed handles, a vision agent sees pixels and bx does not — hand-drive by
+coordinates or instrument the app.
+
 ## Install
 
 ```bash
@@ -112,6 +119,9 @@ assert-and-capture shape.
 bx agent "log in as demo@acme.test and verify the invoice list loads"
 bx agent "add the second item to the cart and check the total" --save cart
 bx agent "reproduce the toggle bug on the settings page" --model sonnet
+bx agent "win Bee Dodge" --url https://app.localhost \
+  --enter "window.__studio.getState().setPlaying(true)" \
+  --win "window.__play.runner.status === 'won'" --budget 0.30
 ```
 
 A headless Claude Agent SDK session drives bx's verbs on Haiku by default. On
@@ -122,7 +132,12 @@ for complex flows (long multi-page journeys, hard canvas work) at ~5× Sonnet
 cost. `--model opus` starts there directly. Every run writes a turn-by-turn
 transcript to `~/.bx/agent-runs/` and a failed run's report says where it got
 stuck; `--verbose` streams the drive live, `--max-turns <n>` raises the
-per-attempt budget (default 40) for long tasks. What comes back is a
+per-attempt budget (default 40) for long tasks. On a canvas app, entry
+discovery — "how do I open X" — is the real cost sink, not the task itself:
+`--url <u>` opens the page, `--enter <js>` runs setup before the model's first
+turn (and again on each escalation rung), and `--win <expr>` is both handed to
+the model as the success predicate and verified by the driver before a pass is
+accepted. What comes back is a
 short structured report — pass/fail, one-paragraph summary, evidence lines,
 turns, token usage — not a transcript. With `--save <name>` the actions actually
 taken AND the assertions that passed are synthesized into
@@ -152,6 +167,23 @@ bx wheel -120 --in "game-canvas"            # scroll / zoom
 
 All four log to the action log, synthesize into flows, and are available to
 `bx agent` — pair them with `bx js` to read whatever state the game exposes.
+
+### Real-time games
+
+A read→decide→keypress loop is seconds per decision and the game runs at 60fps,
+so turn-based play cannot win one. When the app exposes a per-frame input hook,
+`bx drive` installs a controller in the page and polls a predicate until it goes
+truthy — zero model tokens for the whole run, exit 1 on timeout:
+
+```bash
+bx drive --install "window.__play.override = (r, gi) => { /* seek goal, avoid hazards */ }" \
+         --until "window.__play.runner.status === 'won'" --timeout 15000 --poll 500
+```
+
+Re-running `bx drive` replaces the controller in place, so revising a losing
+controller is one command. Mind the input schema — hooks often accept buttons
+(jump/flap/fire) as well as axes. Runs log to the action log and synthesize into
+flows, which turns "level N still winnable" into a zero-token regression test.
 
 ## Recording
 

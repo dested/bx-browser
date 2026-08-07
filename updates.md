@@ -1,5 +1,77 @@
 # Updates
 
+## 2026-08-07 — Round-4 response: bx drive, --enter/--win, estimator truth, evidence scoping
+New `drive` primitive end to end (protocol cmd -> daemon poll loop -> CLI verb
+-> flow api/synthesis -> bx_drive agent tool): installs a JS controller once,
+polls a predicate daemon-side until truthy/timeout — zero model tokens during
+play; re-issuing replaces the controller in place. Agent gains --url (pinned
+tab opens there), --enter <js> (entry recipe runs before turn 1, re-runs per
+escalation rung — kills the entry-discovery cost sink) and --win <expr>
+(handed to the model AND driver-verified before a pass is accepted; falsy
+predicate flips pass->fail). Estimator: cache writes now billed (1.25x), est
+rebased to metered cost at every rung boundary, trailer prints cost=$ AND
+est=$ (est includes aborted rungs, which metered cannot). Fail evidence + flow
+synthesis now scoped to the run's own tab (ActionLogEntry.tab) — no more
+cross-contamination under concurrency. SYSTEM prompt: real-time-game paragraph
+(per-key play cannot win; inspect full input schema incl. buttons; roles from
+defId counts). Site: new "It won a video game" section. Live-proven on the
+fixture game: hand bx drive satisfied in 2.5s/9 polls; agent with
+--url/--enter/--win PASSED ON HAIKU — 14 turns, $0.037, est $0.04, driver
+win-verify line in evidence. tsc clean, 25/25 tests.
+Touched: src/protocol.ts, src/daemon/{session,daemon}.ts, src/cli.ts,
+src/flows/{api,synthesize}.ts, src/agent/{driver,tools}.ts, tests/, skill/
+(synced), README.md, site/
+
+## 2026-08-07 — Round 4b folded into the parity report: mechanism universal, winning controller per-game
+Updated plans/2026-08-07-winning-games-and-claude-chrome-parity.md with the
+three-game generalization evidence: Bee Dodge WON (agent $0.16/72 turns + by
+hand), Picnic Panic LOST to hazard density (mechanism steered perfectly,
+controller too weak — tuning problem), Balloon Flight NOT WON structurally
+(joystick-only controller flew x=200→3950 flawlessly, all hearts, but lift is a
+flap BUTTON — heroY pinned 732 vs flagY 560; override returns Partial<GameInput>
+incl. buttons). New section "Round 4b" with the 3-game table; `bx drive` spec
+tightened (full input schema + inspect hook return shape first + zero-token
+controller-replace/re-poll iteration loop); app-side note now demands win signal
+AND full input schema; TL;DR/Bottom line sharpened.
+
+## 2026-08-07 — Round 4: bx WON a live canvas game (vs Claude Chrome)
+The agent won SceneBeans "Bee Dodge" ($0.16, 72 turns): opened via
+__studio.openProject, inferred hero/flowers/bees from getInstances() defId
+counts, AUTHORED a seek-and-avoid controller, injected it via the app's per-frame
+window.__play.override hook, and polled runner.status until 'won'. This is the
+pattern no screenshot agent (Claude Chrome/computer-use) can execute — read state
++ inject controller + poll a deterministic win signal. Honest-keys play (no hook)
+FAILED on budget: turn-based per-key steering can't keep 60fps pace — the
+fundamental wall for any turn-based agent on real-time games. Critical cost
+finding: same task phrased "find Bee Dodge and win" ALSO failed on budget —
+entry DISCOVERY, not gameplay, ate the whole budget ($0.60 fail vs $0.16 win,
+only difference = exact entry recipe). Top asks: (1) --enter <js> / --win <expr>
+inputs (or a `bx drive --install --until` primitive that installs+polls a
+controller in-page, zero model turns) to kill entry-discovery cost; (2) document
+the in-page-controller pattern as THE way to drive real-time games; (3) still-open
+estimator ~3x pessimism (est $0.60 vs metered $0.21, x4 more data points) + the
+concurrency fail-evidence contamination. Full competitive write-up:
+plans/2026-08-07-winning-games-and-claude-chrome-parity.md. Flow saved:
+canvas-win-controller2.
+
+## 2026-08-07 — Round 3 test results (SceneBeans canvas): gamedev WORKS
+Tester run against the Round-2-response build. Canvas gamedev crossed from
+"falls apart" to "works cheaply". PASSes: wayfinding via app-nav handle (opened
+editor through __studio.getState().openProject — Haiku, $0.05) and pointer-drag
+(solo: shelf→stage in pointer mode, scene instances 30→31 verified via bx_js —
+Haiku, $0.09, --opus not even needed). Budget ceiling verified (failing runs
+abort ended=budget, no more $1.65 runaways); heartbeat + flow-save-on-pass work.
+BUGS to fix: (1) fail-report "last actions" evidence is cross-contaminated under
+concurrency — pulled from the shared action log, not the run's own tab (two
+concurrent runs printed identical tails); scope to the attempt's tab. (2) budget
+estimator still ~2-3x pessimistic (aborts est $0.30 vs metered $0.12 — the 10%
+cache-read pricing note notwithstanding, it's cutting runs ~3x early). (3) "win
+a live game" still open: agent reached play mode but burnt budget hunting a win
+flag — app should expose window.__play.runner.verdict and the prompt should name
+it. Through-line: every PASS named the handle; cold canvas tasks still blind-
+click. Full write-up in plans/2026-08-06-scenebeans-canvas-gamedev-test.md
+(Round 3). Flows saved into the SceneBeans repo: canvas-nav3, canvas-drag-solo.
+
 ## 2026-08-07 — Round-2 response: cost governance + pointer drag + tab-steal fix
 --budget <usd> / --max-wall <s> abort mid-rung across the WHOLE ladder with a
 synthesized fail report (trailer gains ended=budget|wall|stall|turns|error;

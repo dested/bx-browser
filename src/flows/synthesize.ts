@@ -79,6 +79,13 @@ function linesFor(entry: ActionLogEntry): string[] {
       ];
       return [`await b.drag(${c.fromX}, ${c.fromY}, ${c.toX}, ${c.toY}${options(opts)});`];
     }
+    case "drive": {
+      const opts = [
+        ...(c.timeoutMs === undefined ? [] : [`timeoutMs: ${c.timeoutMs}`]),
+        ...(c.pollMs === undefined ? [] : [`pollMs: ${c.pollMs}`]),
+      ];
+      return [`await b.drive(${q(c.install)}, ${q(c.until)}${options(opts)});`];
+    }
     case "key":
       return [`await b.${c.action === "down" ? "keyDown" : "keyUp"}(${q(c.key)});`];
     case "wheel": {

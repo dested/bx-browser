@@ -1,9 +1,11 @@
 # SceneBeans canvas / gamedev shakedown — bx agent
 
-- **Date:** 2026-08-06 (Round 1) · 2026-08-07 (Round 2 re-test)
-- **Status:** active — Round 2 done. P0 (debuggability) FIXED & verified. Tasks
-  still 0/3; deeper blockers now visible (see Round 2). Expect Round 3 after
-  the drag-gesture + cost-governance work.
+- **Date:** 2026-08-06 (Round 1) · 2026-08-07 (Round 2 + Round 3)
+- **Status:** active — Round 3 done. **Canvas gamedev now genuinely works:**
+  wayfinding (via app-nav handle) and pointer-drag both PASS on Haiku for ~$0.05–
+  0.09; budget ceiling + heartbeat + flow-save all verified. Remaining: a
+  concurrency bug in fail-report evidence, a pessimistic budget estimator, and
+  "win a real game" still unsolved. See Round 3.
 - **Type:** test report
 - **Tester:** Claude (Opus) driving the installed `bx` skill against SceneBeans
 - **Target app:** SceneBeans Studio (`http://localhost:5183`) — a kids' game-maker.
@@ -285,3 +287,111 @@ other's tab ids.
   real win).
 - No run exceeds a set `--budget`; stall-detection ends dead rungs early.
 - Cost per run back under ~$0.30 even with escalation.
+
+---
+
+# Round 3 — after cost-governance + pointer-drag + wayfinding (2026-08-07)
+
+Re-ran with the shipped fixes: `--budget 0.30` (hard ceiling across the whole
+ladder, aborts mid-rung + still reports), automatic stall-detection, a heartbeat
+line every ~10 turns, `bx drag --pointer` (press-and-settle PointerEvents, ~120ms
+hold), the agent prompted to map `window.__*` handles and prefer store
+actions/deep-links, and escalations that resume in a fresh tab at the prior
+rung's URL. Daemon was restarted onto the new code before testing.
+
+## Verdict: canvas gamedev crossed from "falls apart" to "works, cheaply"
+
+| Task | Handle named? | Tier | Turns | Wall | Cost | ended | Outcome |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 Open editor via `__studio` | **yes** | haiku | 36 | 44s | **$0.05** | report | **PASS** |
+| 2 Drag + play (concurrent) | no | sonnet | 153 | 223s | $0.12 | **budget** | fail (never reached shelf) |
+| 3 Play → win (concurrent) | partial | sonnet | 150 | 256s | $0.13 | **budget** | fail (reached play, no win) |
+| 4 Drag, solo, handle-named | **yes** | haiku | 48 | 72s | **$0.09** | report | **PASS** (instances 30→31) |
+
+### What's now verified working
+- **Wayfinding via app-nav handle — PASS.** Task 1 opened *"Gumdrop Hop"* with
+  `window.__studio.getState().loadShelf()` + `openProject(id)`, verified
+  `__editorWorld` truthy + `screen==='editor'` — **Haiku, no escalation, $0.05.**
+  The Round 2 entry-gate wall is gone *when the prompt names the handle.*
+- **Pointer-drag — PASS (the Round 2 headline blocker).** The solo test
+  (task 4) opened the editor, dragged shelf→stage in pointer mode, and confirmed
+  **`scene.instances.length` went 30 → 31** via `bx_js`. Haiku, $0.09. The fix
+  (press-and-settle timing; Round 2's failure was Playwright's ~30ms-to-first-move
+  reading as a flick) is real. Notably the agent didn't even need the `--opus` it
+  was allowed — Haiku did it.
+- **Budget ceiling — PASS (was the new P0).** Both failing runs aborted at the
+  ceiling with `ended=budget` and a clean synthesized report. No more $1.65 /
+  10-minute runaways — the worst case is now a bounded, reported failure.
+- **Heartbeat — PASS.** `… turn N · ~$X · last: <action>` every ~10 turns let me
+  watch spend and progress live in the background output file. Exactly the
+  periodic-progress ask.
+- **Flow-save on PASS — PASS.** First green runs in the whole engagement, so the
+  first `--save` artifacts: `flows/canvas-nav3.flow.ts`, `canvas-drag-solo.flow.ts`.
+- **Tier discipline — good.** The two passes stayed on Haiku; escalation to
+  Sonnet only happened on the genuinely-stuck concurrent runs.
+
+### Bugs / rough edges found this round
+1. **Fail-report evidence is cross-contaminated under concurrency (real bug).**
+   Tasks 2 and 3 — different tabs, different runs — printed the *identical* "last
+   8 actions" tail (`…Sunny Meadow → Go to my island → MY ISLAND 0 games →
+   dragged 170,738→640,400 → closed tab 1`). The per-run **heartbeat** was
+   correctly distinct, but the synthesized evidence block is pulled from the
+   **shared global action log window**, not the attempt's own tab. With N
+   concurrent runs the evidence is unreliable. Fix: scope the exhaustion/abort
+   evidence to the run's own tab id (the actions are already tab-tagged for
+   flows — reuse that filter here).
+2. **Budget estimator ~2–3× pessimistic.** Runs aborted at "est $0.30" but the
+   trailer's real metered cost was **$0.12–$0.13**. The ceiling works, but it's
+   cutting runs off at roughly a third of the true dollar spend — a task that
+   would really cost $0.28 gets killed early. Reconcile the live estimate with
+   the metered figure (looks like cache-read tokens are being priced at full
+   rate in the estimate).
+3. **"Win a real game" is still the frontier.** Task 3 *reached* play mode
+   (`window.__play` present) and introspected `__play.runner` for a win flag, but
+   spent its whole budget hunting the state and never reached/detected a win.
+   This isn't a bx bug — it's genuinely hard (real games need many precise timed
+   inputs, and the win flag's location isn't obvious). To make it agent-testable,
+   the app should expose a first-class win/verdict signal (e.g.
+   `window.__play.runner.verdict`) and the task prompt should name it — same
+   pattern that unlocked tasks 1 and 4.
+
+### The through-line: **name the handle.**
+Every PASS named the app-nav handle; every canvas FAIL either didn't (task 2) or
+needed a win-signal that wasn't named (task 3). The wayfinding fix is real but
+**prompt-dependent** — a "cold" canvas task with no handle still falls back to
+blind clicking and burns budget. This is the documented intended path for
+canvas-first apps; the skill should say so loudly (see rec).
+
+## Recommendations (Round 3)
+1. **Fix the concurrency evidence bug (P1).** Scope fail-report "last actions" to
+   the attempt's own tab, not the global log.
+2. **Fix the budget estimator (P1).** Align the live spend estimate with metered
+   cost so `--budget` cuts at the real dollar figure, not ~3× early.
+3. **Skill: make "name the app-nav handle for canvas apps" a first-class
+   instruction**, with the win/verdict-signal corollary. Give the copy-paste
+   shape: *"use `window.__store` to <navigate>, then verify via
+   `window.__x.<signal>`."* Today it's implied; the data says it's the whole game.
+4. **Optional: a `--handles` / warm-up hint** — let the caller pass known
+   `window.__*` handles so the agent maps them turn 1 instead of discovering them
+   (tasks 2/3 spent 20–40 turns just finding the vocabulary).
+5. Keep Opus opt-in — Round 3's real work was all Haiku; Opus wasn't needed once
+   wayfinding + pointer-drag landed. `--opus` is a safety net, not a default.
+
+## Round 4 — winning a live game (separate doc)
+The "win a real game" frontier got its own write-up:
+**`plans/2026-08-07-winning-games-and-claude-chrome-parity.md`**. Headline: the
+agent **won** Bee Dodge ($0.16) by authoring an in-page seek/avoid controller and
+polling `runner.status==='won'` — a pattern screenshot agents can't execute — but
+only when handed the exact entry recipe; "find the game and win" failed on budget
+(entry *discovery*, not gameplay, is the cost sink). Asks there: `--enter`/`--win`
+inputs (or a `bx drive` primitive), plus the same estimator + concurrency-evidence
+fixes. Read that doc for the competitive positioning vs Claude Chrome.
+
+## Bottom line across all three rounds
+- **R1:** 0/3, undebuggable black boxes. **R2:** 0/3 but fully debuggable + `bx_js`
+  works; blockers became visible (entry gate, drag timing, cost). **R3:** the two
+  blockers with clean fixes (wayfinding, drag) both **PASS on Haiku for ~$0.05–
+  0.09**; cost is bounded; failures are cheap and legible. Canvas gamedev went
+  from "falls apart completely" to "works when you name the handle." Remaining
+  work is polish (evidence scoping, estimator) + the genuinely-hard "win a live
+  game" frontier.

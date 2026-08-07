@@ -7,6 +7,8 @@ type Stat = {
   label: string;
   detail: ReactNode;
   compare?: { value: string; label: string };
+  /** Fills the row when the card count is odd, so no half-row is left empty. */
+  full?: boolean;
 };
 
 const STATS: Stat[] = [
@@ -48,6 +50,18 @@ const STATS: Stat[] = [
       </>
     ),
   },
+  {
+    value: "$0.16",
+    label: "A real-time canvas game, won",
+    detail: (
+      <>
+        An agent-authored in-page controller, accepted only against a
+        deterministic win signal — <C>runner.status === "won"</C>. 72 turns, 134s,
+        nothing on screen to click.
+      </>
+    ),
+    full: true,
+  },
 ];
 
 const FACTS = [
@@ -61,7 +75,10 @@ export function Numbers() {
     <div>
       <div className="grid gap-px overflow-hidden rounded-lg border border-line bg-line sm:grid-cols-2">
         {STATS.map((stat) => (
-          <div key={stat.label} className="bg-panel p-6 md:p-7">
+          <div
+            key={stat.label}
+            className={`bg-panel p-6 md:p-7 ${stat.full ? "sm:col-span-2" : ""}`}
+          >
             <p className="font-mono text-[11px] tracking-[0.16em] text-fog-dim uppercase">
               {stat.label}
             </p>

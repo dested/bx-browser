@@ -1,6 +1,6 @@
 # bx — cliffnotes
 
-Last updated: 2026-08-06
+Last updated: 2026-08-07
 
 Purpose-built browser automation for Claude Code. A per-profile **daemon**
 (runs under **Node** — not Bun; see decisions.md) holds one real Chrome via
@@ -27,13 +27,14 @@ src/
     synthesize.ts    action log → flow file (replay-stable targets, no refs)
   agent/
     tools.ts         bx verbs as Agent SDK MCP tools (text in, text out)
-    driver.ts        runAgent: Haiku → one-shot Sonnet escalation, usage, --save
+    driver.ts        runAgent: haiku→sonnet(→opus opt-in) ladder, governance
+                     (--budget/--max-wall/stall), --url/--enter/--win, --save
   bench/bench.ts     bun run bench [--agent] → bench-results.json
 fixtures/app/        "TaskBox" test app served by the daemon at /fixture
 flows/examples/      canonical user-facing flow examples
 skill/SKILL.md       the Claude Code skill (copy to ~/.claude/skills/bx)
 scripts/build-harness.ts  Bun.build bundle of harness.ts (+ self-heals dep dist)
-tests/smoke.test.ts  15-test live suite (bun test), profile "bxtest"
+tests/smoke.test.ts  live daemon suite (bun test), profile "bxtest"
 tests/flows.test.ts  synthesis + bx/flow-alias unit tests (no browser)
 site/                bx.dested.com landing (Vite+React+Tailwind, self-contained)
 Dockerfile, drydock.yaml, .github/  DRYDOCK-MANAGED (portal regenerates — don't hand-edit)
@@ -92,11 +93,15 @@ Dockerfile, drydock.yaml, .github/  DRYDOCK-MANAGED (portal regenerates — don'
 
 - Daemon: 127.0.0.1:<random port> — /health, /cmd (token), /shutdown (token),
   /fixture/* (TaskBox), /harness* (recording distill page).
-- Fixture views: #/login (demo@taskbox.test / hunter2), #/tasks, #/settings.
+- Fixture views: #/login (demo@taskbox.test / hunter2), #/tasks, #/settings,
+  #/game (canvas mini-game: window.__game state, keys hook, pointer shelf).
 
 ## Status
 
-- v1 complete: verbs, flows, agent (Haiku→Sonnet), recording+distill, bench,
-  skill. 10/10 smoke; recording e2e-verified (full package in 3.4s).
+- v1 complete: verbs (incl. canvas mouse/drag/key/wheel + `drive` in-page
+  controller), flows, agent (haiku→sonnet→opus opt-in, budget/wall/stall
+  governance, --url/--enter/--win entry+win recipe), recording+distill,
+  bench, skill, bx.dested.com. Real-time-game driving live-proven (SceneBeans
+  Round 4 win $0.16; fixture-game agent win on Haiku $0.037).
 - v2 planned: playwright-crx bridge extension for daily-driver Chrome profiles
   (see decisions.md) and `bx watch`.

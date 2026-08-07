@@ -41,6 +41,7 @@ const PRICING: Record<AgentModel, { input: number; output: number }> = {
   opus: { input: 5, output: 25 },
 };
 const CACHE_READ_RATE = 0.1; // cache reads bill at a tenth of the input rate
+const CACHE_WRITE_RATE = 1.25; // cache writes bill at 125% of the input rate
 
 const AGENT_RUNS_DIR = "agent-runs"; // ~/.bx/agent-runs/<ts>.jsonl
 const TOOL_RESULT_MAX_CHARS = 2000;
@@ -57,6 +58,7 @@ const SYSTEM = `You are bx-driver, operating a real browser through bx tools. Yo
 Method: (1) bx_open the target URL, or bx_els to see the current page. (2) Element lists show numbered refs like [3] button "Save" — act on them by passing the number as target, or pass visible text / a data-testid. (3) After any action that changes the page, the result tells you; call bx_els again only when you need fresh refs. (4) Verify every task outcome with bx_expect before reporting. (5) If a target is not found, read the 'did you mean' candidates and retry once with the best one. (6) Check bx_console if something seems broken.
 Canvas/games: when the page is a canvas with no useful elements, act by coordinates — bx_mouse/bx_drag/bx_key with in set to the canvas testid so x/y are relative to its top-left; hold movement keys with bx_key down then up. You cannot see the canvas: read state the app exposes via bx_js (e.g. window.__game) and verify outcomes with bx_js too — bx_expect only sees DOM text.
 Finding targets on a canvas: you cannot see it, so never guess pixel positions for an unlabeled target. First map the app's exposed handles — bx_js Object.keys(window).filter(k => k.startsWith('__')) — then explore the promising one (Object.keys, .getState?.()). Prefer calling an app navigation/store action or opening a deep-link URL via bx_js over blind coordinate clicks; coordinates are for targets whose position you actually know from the task, from state, or from element-relative geometry.
+Real-time games: turn-based per-key play CANNOT win a 60fps game — by the time you read state and press a key the game has moved on. Use bx_drive: (1) find the app's per-frame input hook in its exposed state; (2) dump ONE sample of the full input shape it accepts — buttons AND axes, a joystick-only controller cannot win a game whose jump/flap is a button; (3) infer roles from instance counts (1-of = hero, N-of = collectibles or hazards); (4) bx_drive installs your controller and polls the win signal entirely in-page, zero turns while it plays; (5) on timeout, revise the controller and call bx_drive again — it replaces the old one without restarting the game.
 Rules: never invent selectors; prefer testids and visible text. Keep to the task — do not explore. When the task is done (or truly impossible), call bx_report exactly once with status, a 2–3 sentence summary, and evidence (assertions passed, final URL). Then stop.`;
 
 type Report = { status: "pass" | "fail"; summary: string; evidence: string[] };
@@ -73,6 +75,8 @@ interface Attempt {
   endedBy: EndedBy;
   /** Last page URL this attempt reached; the next rung starts there. */
   lastUrl?: string;
+  /** Tab this attempt drove; what scopes the shared action log back to it. */
+  tabId?: number;
 }
 
 /** What an escalation is told about the attempt it is replacing. */
@@ -99,7 +103,11 @@ type AssistantUsage = Extract<SDKMessage, { type: "assistant" }>["message"]["usa
 function messageCostUsd(tier: AgentModel, usage: AssistantUsage): number {
   const price = PRICING[tier];
   const cacheRead = usage.cache_read_input_tokens ?? 0;
-  const input = usage.input_tokens * price.input + cacheRead * price.input * CACHE_READ_RATE;
+  const cacheCreate = usage.cache_creation_input_tokens ?? 0;
+  const input =
+    usage.input_tokens * price.input +
+    cacheRead * price.input * CACHE_READ_RATE +
+    cacheCreate * price.input * CACHE_WRITE_RATE;
   return (input + usage.output_tokens * price.output) / 1_000_000;
 }
 
@@ -226,15 +234,27 @@ async function actionLogNextIndex(profile: string): Promise<number> {
   }
 }
 
-async function actionsSince(profile: string, sinceIndex: number, max: number): Promise<string[]> {
+/** `tab` keeps a concurrent run's actions out of this one's evidence. */
+async function actionsSince(
+  profile: string,
+  sinceIndex: number,
+  max: number,
+  tab: number | undefined,
+): Promise<string[]> {
   try {
     const res = await cmd<ActionLogResult>(profile, { cmd: "actionLog", sinceIndex });
     if (!res.ok) return [];
-    return res.data.entries.slice(-max).map((e) => e.text);
+    const entries =
+      tab === undefined ? res.data.entries : res.data.entries.filter((e) => e.tab === tab);
+    return entries.slice(-max).map((e) => e.text);
   } catch {
     return [];
   }
 }
+
+// JSON forms a truthy win predicate can never take. A pass whose predicate
+// renders as one of these is the model claiming an outcome the page denies.
+const FALSY_JSON = new Set(["false", "null", "undefined", "0", '""']);
 
 const ZERO_USAGE: AgentUsage = {
   inputTokens: 0,
@@ -274,7 +294,7 @@ async function runAttempt(
   // Each attempt drives its own tab, so an escalation starts in a fresh page
   // and two concurrent runs never share one. Handing that tab the URL the last
   // rung reached is what makes the "orient yourself" instruction below true.
-  const tools = createBxTools(opts.profile, sink, prior?.lastUrl);
+  const tools = createBxTools(opts.profile, sink, prior?.lastUrl ?? opts.startUrl);
 
   // An escalation that only knows the prior summary re-runs the same failure at
   // a higher price; the actions tell it where the cheap model actually got to.
@@ -286,10 +306,24 @@ async function runAttempt(
     prior?.lastUrl === undefined
       ? "The browser is in whatever state it left. Start by calling bx_els to orient, then complete the task."
       : `You start in a fresh tab already open at ${prior.lastUrl} (where the previous attempt ended). Call bx_els to orient, then continue.`;
-  const prompt =
+  // The entry recipe runs per rung, not per run: an escalation gets a fresh tab
+  // and no in-page state survives that.
+  let setup = "";
+  if (opts.enterJs !== undefined) {
+    const entry = await tools.runJs(`(async () => { ${opts.enterJs} ; return "entered" })()`);
+    setup = entry.ok
+      ? `Setup already ran in your tab: \`${opts.enterJs}\` → ${entry.value}. `
+      : `Setup JS was attempted but threw: ${entry.value} — recover or report fail. `;
+  }
+  const win =
+    opts.winExpr === undefined
+      ? ""
+      : ` The task's success predicate: bx_js \`${opts.winExpr}\` must be truthy. Poll it; report pass only once it is truthy.`;
+  const base =
     prior === null
       ? opts.instruction
       : `A previous attempt by a smaller model did not complete this task (its last report: ${prior.summary}).${priorActions} ${orient}\n\n${opts.instruction}`;
+  const prompt = `${setup}${base}${win}`;
 
   const maxTurns = opts.maxTurns ?? MAX_TURNS;
   const stallWindow = opts.stallWindow ?? STALL_WINDOW;
@@ -318,6 +352,9 @@ async function runAttempt(
   };
 
   let turns = 0;
+  // Every completed rung re-anchors the ladder-wide estimate to metered truth,
+  // so per-message pricing drift cannot compound across escalations.
+  const rungBase = run.estUsd;
   let usage: AgentUsage = { ...ZERO_USAGE };
   let failure: string | null = null;
   let stopped: { by: EndedBy; summary: string; extra: string[] } | null = null;
@@ -381,6 +418,9 @@ async function runAttempt(
           cacheReadTokens: message.usage.cache_read_input_tokens,
           costUsd: message.total_cost_usd,
         };
+        if (typeof message.total_cost_usd === "number") {
+          run.estUsd = rungBase + message.total_cost_usd;
+        }
       }
 
       // A model that has already reported is one message from stopping on its
@@ -410,12 +450,30 @@ async function runAttempt(
     if (stopped === null) failure = e instanceof Error ? e.message : String(e);
   } finally {
     if (wallTimer !== null) clearTimeout(wallTimer);
+    // A reported pass is a claim; the predicate is the evidence. Checked here,
+    // while the tab this run drove is still open.
+    const claimed = box.report;
+    if (opts.winExpr !== undefined && claimed?.status === "pass") {
+      const v = await tools.runJs(opts.winExpr);
+      if (!v.ok) {
+        // Tab gone or the expression threw: unverifiable is not disproved.
+        claimed.evidence.push(`win predicate could not be verified: ${v.value}`);
+      } else if (FALSY_JSON.has(v.value)) {
+        box.report = {
+          status: "fail",
+          summary: `model reported pass but the win predicate evaluated ${v.value}: ${opts.winExpr}`,
+          evidence: [...claimed.evidence],
+        };
+      } else {
+        claimed.evidence.push(`win predicate verified: ${opts.winExpr} → ${v.value}`);
+      }
+    }
     // A failed attempt must not leak its tab, and a dead daemon must not turn
     // cleanup into the run's outcome.
     await tools.close().catch(() => undefined);
   }
 
-  const actions = await actionsSince(opts.profile, startIndex, EXHAUSTION_EVIDENCE);
+  const actions = await actionsSince(opts.profile, startIndex, EXHAUSTION_EVIDENCE, tools.tabId());
 
   // An attempt that ends without calling bx_report is the black box this whole
   // file exists to avoid: synthesize the report the model owed us, with what it
@@ -443,13 +501,24 @@ async function runAttempt(
     };
   }
 
-  return { tier, report: box.report, turns, usage, actions, endedBy, lastUrl: tools.lastUrl() };
+  return {
+    tier,
+    report: box.report,
+    turns,
+    usage,
+    actions,
+    endedBy,
+    lastUrl: tools.lastUrl(),
+    tabId: tools.tabId(),
+  };
 }
 
+/** `tabIds` — every tab this run drove; anything else in the log belongs to someone else. */
 async function saveFlow(
   opts: AgentRunOptions,
   name: string,
   startIndex: number,
+  tabIds: ReadonlySet<number>,
 ): Promise<string | undefined> {
   try {
     const res = await cmd<ActionLogResult>(opts.profile, {
@@ -457,7 +526,11 @@ async function saveFlow(
       sinceIndex: startIndex,
     });
     if (!res.ok) return undefined;
-    const source = synthesizeFlow(res.data.entries, name);
+    const entries =
+      tabIds.size === 0
+        ? res.data.entries
+        : res.data.entries.filter((e) => e.tab !== undefined && tabIds.has(e.tab));
+    const source = synthesizeFlow(entries, name);
     const dir = path.resolve(process.cwd(), "flows");
     await mkdir(dir, { recursive: true });
     const file = path.join(dir, `${name}.flow.ts`);
@@ -550,10 +623,14 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentReport> {
     usage: attempts.reduce<AgentUsage>((u, a) => addUsage(u, a.usage), { ...ZERO_USAGE }),
     transcriptPath: transcript.path,
     endedBy: attempt.endedBy,
+    estUsd: run.estUsd,
   };
 
   if (opts.save !== undefined && report.status === "pass") {
-    report.savedFlow = await saveFlow(opts, opts.save, startIndex);
+    const tabIds = new Set(
+      attempts.map((a) => a.tabId).filter((id): id is number => id !== undefined),
+    );
+    report.savedFlow = await saveFlow(opts, opts.save, startIndex, tabIds);
   }
 
   await appendRunLog(opts, report, run.estUsd);
