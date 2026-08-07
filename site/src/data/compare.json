@@ -1,0 +1,486 @@
+{
+ "oldway": {
+  "title": "Claude in Chrome",
+  "driver": "Fable — the main session",
+  "events": [
+   {
+    "at": 0,
+    "type": "cmd",
+    "text": "tabs_context()",
+    "tok": 0
+   },
+   {
+    "at": 400,
+    "type": "out",
+    "text": "{\"availableTabs\":[{\"tabId\":1187266771,\"title\":\"New Tab\",\"url\":\"chrome://newtab/\"}],\"tabGro…",
+    "tok": 90
+   },
+   {
+    "at": 7792,
+    "type": "cmd",
+    "text": "navigate(http://127.0.0.1:57395/fixture)",
+    "tok": 0
+   },
+   {
+    "at": 8192,
+    "type": "out",
+    "text": "Navigated to http://127.0.0.1:57395/fixture",
+    "tok": 90
+   },
+   {
+    "at": 24604,
+    "type": "cmd",
+    "text": "read_page()",
+    "tok": 0
+   },
+   {
+    "at": 25004,
+    "type": "out",
+    "text": "main [ref_1]\n heading \"TaskBox\" [ref_2]\n label \"Email\" [ref_3]\n textbox \"Email\" [ref_4] ty…",
+    "tok": 120
+   },
+   {
+    "at": 28713,
+    "type": "cmd",
+    "text": "computer(screenshot)",
+    "tok": 0
+   },
+   {
+    "at": 29113,
+    "type": "out",
+    "text": "Successfully captured screenshot (1568x776, jpeg) - ID: ss_7349yktkk",
+    "tok": 1620
+   },
+   {
+    "at": 39213,
+    "type": "cmd",
+    "text": "computer(left_click, at 783,136)",
+    "tok": 0
+   },
+   {
+    "at": 39613,
+    "type": "out",
+    "text": "Clicked at (783, 136)",
+    "tok": 90
+   },
+   {
+    "at": 39713,
+    "type": "note",
+    "text": "coordinate click computed from a 1568px screenshot of a 1512px viewport — 3.7% scale error on every click",
+    "tok": 0
+   },
+   {
+    "at": 43263,
+    "type": "cmd",
+    "text": "computer(type, \"demo@taskbox.test\")",
+    "tok": 0
+   },
+   {
+    "at": 43663,
+    "type": "out",
+    "text": "Typed \"demo@taskbox.test\"",
+    "tok": 90
+   },
+   {
+    "at": 51253,
+    "type": "cmd",
+    "text": "computer(left_click, at 783,210)",
+    "tok": 0
+   },
+   {
+    "at": 51653,
+    "type": "out",
+    "text": "Clicked at (783, 210)",
+    "tok": 90
+   },
+   {
+    "at": 56285,
+    "type": "cmd",
+    "text": "computer(type, \"hunter2\")",
+    "tok": 0
+   },
+   {
+    "at": 56685,
+    "type": "out",
+    "text": "Typed \"hunter2\"",
+    "tok": 90
+   },
+   {
+    "at": 61207,
+    "type": "cmd",
+    "text": "computer(left_click, at 488,257)",
+    "tok": 0
+   },
+   {
+    "at": 61607,
+    "type": "out",
+    "text": "Clicked at (488, 257)",
+    "tok": 90
+   },
+   {
+    "at": 65134,
+    "type": "cmd",
+    "text": "computer(screenshot)",
+    "tok": 0
+   },
+   {
+    "at": 65534,
+    "type": "out",
+    "text": "Successfully captured screenshot (1568x776, jpeg) - ID: ss_37410giot",
+    "tok": 1620
+   },
+   {
+    "at": 69105,
+    "type": "cmd",
+    "text": "computer(left_click, at 99,30)",
+    "tok": 0
+   },
+   {
+    "at": 69505,
+    "type": "out",
+    "text": "Clicked at (99, 30)",
+    "tok": 90
+   },
+   {
+    "at": 72553,
+    "type": "cmd",
+    "text": "computer(screenshot)",
+    "tok": 0
+   },
+   {
+    "at": 72953,
+    "type": "err",
+    "text": "Error capturing screenshot: CDP sendCommand \"Page.captureScreenshot\" timed out after 30000…",
+    "tok": 70
+   },
+   {
+    "at": 73053,
+    "type": "note",
+    "text": "30 seconds of dead air waiting on CDP",
+    "tok": 0
+   },
+   {
+    "at": 115904,
+    "type": "cmd",
+    "text": "computer(screenshot)",
+    "tok": 0
+   },
+   {
+    "at": 116304,
+    "type": "out",
+    "text": "Successfully captured screenshot (1568x776, jpeg) - ID: ss_5201ntwhk",
+    "tok": 1620
+   },
+   {
+    "at": 133157,
+    "type": "cmd",
+    "text": "computer(left_click, at 99,31)",
+    "tok": 0
+   },
+   {
+    "at": 133557,
+    "type": "out",
+    "text": "Clicked at (99, 31)",
+    "tok": 90
+   },
+   {
+    "at": 133657,
+    "type": "note",
+    "text": "click reported success — the page never navigated",
+    "tok": 0
+   },
+   {
+    "at": 136617,
+    "type": "cmd",
+    "text": "computer(screenshot)",
+    "tok": 0
+   },
+   {
+    "at": 137017,
+    "type": "err",
+    "text": "Error capturing screenshot: CDP sendCommand \"Page.captureScreenshot\" timed out after 30000…",
+    "tok": 70
+   },
+   {
+    "at": 137117,
+    "type": "note",
+    "text": "second 30s timeout; input delivery degraded for the rest of the session",
+    "tok": 0
+   },
+   {
+    "at": 173384,
+    "type": "cmd",
+    "text": "read_page(filter=interactive)",
+    "tok": 0
+   },
+   {
+    "at": 173784,
+    "type": "out",
+    "text": "link \"Tasks\" [ref_8] href=\"#/tasks\"\nlink \"Settings\" [ref_9] href=\"#/settings\"\nbutton \"Sign…",
+    "tok": 120
+   },
+   {
+    "at": 185989,
+    "type": "cmd",
+    "text": "computer(left_click, ref=ref_9)",
+    "tok": 0
+   },
+   {
+    "at": 186389,
+    "type": "out",
+    "text": "Clicked on element ref_9",
+    "tok": 90
+   },
+   {
+    "at": 190121,
+    "type": "cmd",
+    "text": "read_page(filter=interactive)",
+    "tok": 0
+   },
+   {
+    "at": 190521,
+    "type": "out",
+    "text": "link \"Tasks\" [ref_8] href=\"#/tasks\"\nlink \"Settings\" [ref_9] href=\"#/settings\"\nbutton \"Sign…",
+    "tok": 120
+   }
+  ],
+  "outcome": {
+   "status": "FAILED",
+   "at": 193521,
+   "wall": "3.2 min",
+   "tokens": "~8,000 premium tokens",
+   "cost": "~$0.08–0.20",
+   "detail": "Settings navigation never landed after 3 attempts"
+  }
+ },
+ "bx": {
+  "title": "bx agent",
+  "driver": "Haiku — a subagent; the main session reads a ~300-token report",
+  "events": [
+   {
+    "at": 5299,
+    "type": "say",
+    "text": "I'll help you with this task. Let me start by opening the URL and then proceed with loggin…",
+    "tok": 0
+   },
+   {
+    "at": 5505,
+    "type": "cmd",
+    "text": "bx open http://127.0.0.1:62747/fixture",
+    "tok": 0
+   },
+   {
+    "at": 5547,
+    "type": "out",
+    "text": "TaskBox — http://127.0.0.1:62747/fixture",
+    "tok": 26
+   },
+   {
+    "at": 6746,
+    "type": "say",
+    "text": "Good! I'm on the login page. Now I'll log in with the provided credentials.",
+    "tok": 0
+   },
+   {
+    "at": 7448,
+    "type": "cmd",
+    "text": "bx fill 1 demo@taskbox.test",
+    "tok": 0
+   },
+   {
+    "at": 7573,
+    "type": "cmd",
+    "text": "bx fill 2 hunter2",
+    "tok": 0
+   },
+   {
+    "at": 7639,
+    "type": "out",
+    "text": "ok — filled 1 with \"demo@taskbox.test\"",
+    "tok": 12
+   },
+   {
+    "at": 7811,
+    "type": "out",
+    "text": "ok — filled 2 with \"hunter2\"",
+    "tok": 12
+   },
+   {
+    "at": 10983,
+    "type": "say",
+    "text": "Now I'll click the Sign in button.",
+    "tok": 0
+   },
+   {
+    "at": 11175,
+    "type": "cmd",
+    "text": "bx click 3",
+    "tok": 0
+   },
+   {
+    "at": 11351,
+    "type": "out",
+    "text": "ok — clicked 3",
+    "tok": 17
+   },
+   {
+    "at": 12693,
+    "type": "say",
+    "text": "Good! I've logged in successfully. Now I need to go to Settings. Let me see what elements …",
+    "tok": 0
+   },
+   {
+    "at": 12701,
+    "type": "cmd",
+    "text": "bx els",
+    "tok": 0
+   },
+   {
+    "at": 12709,
+    "type": "out",
+    "text": "[1] link \"Tasks\"",
+    "tok": 42
+   },
+   {
+    "at": 14022,
+    "type": "say",
+    "text": "Perfect! I can see the Settings link. Let me click on it.",
+    "tok": 0
+   },
+   {
+    "at": 14026,
+    "type": "cmd",
+    "text": "bx click 2",
+    "tok": 0
+   },
+   {
+    "at": 14238,
+    "type": "out",
+    "text": "ok — clicked 2",
+    "tok": 18
+   },
+   {
+    "at": 15419,
+    "type": "say",
+    "text": "Great! I'm now on the Settings page. Let me check what elements are available to find the …",
+    "tok": 0
+   },
+   {
+    "at": 15515,
+    "type": "cmd",
+    "text": "bx els",
+    "tok": 0
+   },
+   {
+    "at": 15527,
+    "type": "out",
+    "text": "[1] link \"Tasks\"",
+    "tok": 25
+   },
+   {
+    "at": 16637,
+    "type": "say",
+    "text": "Excellent! I can see the Dark mode checkbox. Let me click on it to enable dark mode.",
+    "tok": 0
+   },
+   {
+    "at": 16954,
+    "type": "cmd",
+    "text": "bx click 4",
+    "tok": 0
+   },
+   {
+    "at": 17137,
+    "type": "out",
+    "text": "ok — clicked 4",
+    "tok": 12
+   },
+   {
+    "at": 18340,
+    "type": "say",
+    "text": "Now I need to save the changes. Let me click the Save button.",
+    "tok": 0
+   },
+   {
+    "at": 18529,
+    "type": "cmd",
+    "text": "bx click 5",
+    "tok": 0
+   },
+   {
+    "at": 18737,
+    "type": "out",
+    "text": "ok — clicked 5",
+    "tok": 12
+   },
+   {
+    "at": 20325,
+    "type": "say",
+    "text": "Let me verify that the dark mode has been enabled by checking the page text for \"Dark mode…",
+    "tok": 0
+   },
+   {
+    "at": 20487,
+    "type": "cmd",
+    "text": "bx expect text Dark mode on",
+    "tok": 0
+   },
+   {
+    "at": 20494,
+    "type": "out",
+    "text": "PASS: text \"Dark mode on\" is visible",
+    "tok": 12
+   },
+   {
+    "at": 21880,
+    "type": "say",
+    "text": "Perfect! Let me take a screenshot to confirm the state and then report success.",
+    "tok": 0
+   },
+   {
+    "at": 21953,
+    "type": "cmd",
+    "text": "bx snap",
+    "tok": 0
+   },
+   {
+    "at": 22026,
+    "type": "out",
+    "text": "screenshot saved: C:\\Users\\dested\\.bx\\snaps\\20260806-182200.png",
+    "tok": 15
+   },
+   {
+    "at": 23139,
+    "type": "say",
+    "text": "Excellent! I have successfully completed all the requested tasks:",
+    "tok": 0
+   },
+   {
+    "at": 25085,
+    "type": "cmd",
+    "text": "bx report pass I opened the TaskBox login page at http://127.0.0.1:627…",
+    "tok": 0
+   },
+   {
+    "at": 25089,
+    "type": "out",
+    "text": "report recorded — you are done, stop now.",
+    "tok": 12
+   },
+   {
+    "at": 28385,
+    "type": "say",
+    "text": "Task completed successfully! Here's what I did:",
+    "tok": 0
+   }
+  ],
+  "outcome": {
+   "status": "PASS",
+   "at": 29185,
+   "wall": "25.9 s",
+   "tokens": "48 tool-output tokens/step avg, all on Haiku",
+   "cost": "$0.062",
+   "detail": "14 turns, no escalation; main session consumed ~300 tokens"
+  }
+ }
+}
