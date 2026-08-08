@@ -2,6 +2,28 @@
 
 Newest first. Append-only; supersede, never delete.
 
+## 2026-08-07 — Recording selects the captured tab by action activity, not byte size
+
+**Why:** Playwright's `recordVideo` writes one webm per page in the context;
+`recordStop` used to ship the largest file by bytes. An idle tab with a looping
+animation (a marketing hero rotator) encodes to a bigger webm than a busy tab of
+mostly-static admin pages, so recording while a `bx agent` ran silently shipped
+the wrong tab — a blank/idle video that looked fine by frame count. The action
+log already stamps every entry with its tab id, so selection now tallies actions
+per tab and picks the most-driven tab; bytes only break ties. A loud guard
+throws when the winning tab saw zero actions but another tab was driven, so the
+failure mode is an immediate error instead of a plausible-looking blank video.
+The persistent ffmpeg console window during a record is Playwright's own
+recordVideo encoder — bx cannot pass `windowsHide` into that internal spawn. The
+real fix for BOTH bugs is to drop recordVideo and capture via CDP
+`Page.startScreencast` on one chosen page + our own `windowsHide:true` ffmpeg,
+which makes wrong-tab capture structurally impossible (record one known tab, not
+"record every page then guess"). Deferred; `runCommand` got `windowsHide:true`
+in the meantime so bx's own helper spawns stop flashing cmd.exe.
+**Rejected:** byte-size selection (the bug), frame-count selection (falls into
+the same trap — an idle animation has plenty of frames), silently shipping
+whatever webm wins when a driven tab exists (must fail loudly).
+
 ## 2026-08-07 — npm package name is `bx-browser`; the bin and brand stay `bx`
 
 **Why:** `bx` is squatted on npm. `bx-browser` keeps the brand first

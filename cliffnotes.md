@@ -36,6 +36,7 @@ skill/SKILL.md       the Claude Code skill (installed via `bx install-skill`)
 scripts/build-harness.ts  Bun.build bundle of harness.ts (+ self-heals dep dist)
 tests/smoke.test.ts  live daemon suite (bun test), profile "bxtest"
 tests/flows.test.ts  synthesis + bx/flow-alias unit tests (no browser)
+tests/record.test.ts recording tab-selection unit tests (no browser)
 site/                bx.dested.com landing (Vite+React+Tailwind, self-contained)
 Dockerfile, drydock.yaml, .github/  DRYDOCK-MANAGED (portal regenerates — don't hand-edit)
 ```
@@ -83,6 +84,13 @@ Dockerfile, drydock.yaml, .github/  DRYDOCK-MANAGED (portal regenerates — don'
   in place on demand. Durable fix = `prepare` script in that repo (user's).
 - Recording relaunches the browser context twice (video is a context-creation
   option); open tabs are restored to the active URL only.
+- Recording selects the captured tab by ACTION ACTIVITY, not byte size —
+  byte-size (or frame-count) selection silently loses to a looping animation on
+  an idle tab and ships the wrong/blank video. recordStop tallies the action log
+  per tab (`entry.tab`) and picks the most-driven page; a guard throws if the
+  winning tab saw zero actions while another was driven. The persistent ffmpeg
+  window during a record is Playwright's own recordVideo encoder (not a bx
+  spawn) — see decisions.md for the CDP-screencast fix that retires both.
 - Recording packages ship the video twice (raw.webm + byte-identical
   rec-01/walkthrough.webm) — accepted for v1: report.md references the latter,
   CLI/docs the former. Local disk only; recordings/ is gitignored.

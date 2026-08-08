@@ -970,6 +970,15 @@ export class Session {
   }
 
   /**
+   * Read-only view of a page's stable tab id — recording pairs each context
+   * page's video with its tab so it can select the tab that was actually
+   * driven (by action count) rather than the largest webm.
+   */
+  tabIdOf(page: Page): number {
+    return this.pageId(page);
+  }
+
+  /**
    * Reopens the browser with different context options, restoring the active
    * page's URL. Video capture can only be switched on when a context is
    * created, and the webm is only flushed when it closes — so starting and

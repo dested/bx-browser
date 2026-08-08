@@ -35,6 +35,59 @@ interface RecordingState {
 /** One recording at a time — the daemon owns a single browser context. */
 let state: RecordingState | null = null;
 
+// ---------------------------------------------------------------------------
+// Tab selection (pure — unit-tested in tests/record.test.ts)
+// ---------------------------------------------------------------------------
+
+/** A page's flushed webm, tagged with the tab id that produced it. */
+export interface VideoCandidate {
+  tab: number;
+  file: string;
+  bytes: number;
+}
+
+/**
+ * Which tab's video to ship. Playwright's recordVideo writes one webm per page
+ * in the context; picking the largest file silently loses to a looping
+ * animation on an idle tab (that encodes bigger than a busy tab of static
+ * pages). Select by ACTION ACTIVITY instead — the tab that saw the most log
+ * entries — and let bytes break ties only for a passive, action-free recording.
+ */
+export type VideoSelection =
+  | { ok: true; source: VideoCandidate; actions: number }
+  | { ok: false; reason: "no-video" }
+  | { ok: false; reason: "wrong-tab"; drivenActions: number };
+
+/** Tally action-log entries per acting tab; entries with no page are ignored. */
+export function tallyActionsByTab(entries: readonly { tab?: number }[]): Map<number, number> {
+  const byTab = new Map<number, number>();
+  for (const entry of entries) {
+    if (entry.tab === undefined) continue;
+    byTab.set(entry.tab, (byTab.get(entry.tab) ?? 0) + 1);
+  }
+  return byTab;
+}
+
+export function selectRecordedVideo(
+  candidates: readonly VideoCandidate[],
+  actionsByTab: Map<number, number>,
+): VideoSelection {
+  const scored = candidates.map((c) => ({ ...c, actions: actionsByTab.get(c.tab) ?? 0 }));
+  scored.sort((a, b) => b.actions - a.actions || b.bytes - a.bytes);
+  const source = scored[0];
+  if (!source || source.bytes === 0) return { ok: false, reason: "no-video" };
+
+  // Loud guard: some tab WAS driven this recording, yet the winning video's tab
+  // saw zero actions — the driven tab's video is missing, so a passive tab won.
+  // Fail rather than silently ship a blank/idle video (the byte-heuristic bug).
+  if (actionsByTab.size > 0 && source.actions === 0) {
+    let drivenActions = 0;
+    for (const n of actionsByTab.values()) drivenActions += n;
+    return { ok: false, reason: "wrong-tab", drivenActions };
+  }
+  return { ok: true, source, actions: source.actions };
+}
+
 export function recordingSlug(): string | null {
   return state?.slug ?? null;
 }
@@ -54,7 +107,9 @@ interface CommandResult {
 function runCommand(cmd: string, args: string[], cwd: string): Promise<CommandResult> {
   return new Promise((resolve) => {
     // Windows `spawn` does not apply PATHEXT, so `bun` alone would not resolve.
-    const proc = spawn(cmd, args, { cwd, shell: process.platform === "win32" });
+    // windowsHide keeps `shell:true` from flashing a cmd.exe window whenever a
+    // helper (ffmpeg install, harness rebuild) fires during a record.
+    const proc = spawn(cmd, args, { cwd, shell: process.platform === "win32", windowsHide: true });
     let output = "";
     proc.stdout.on("data", (chunk: Buffer) => {
       output += chunk.toString();
@@ -222,6 +277,14 @@ export async function recordStart(session: Session, slug: string): Promise<Recor
   );
   await mkdir(videoTmpDir, { recursive: true });
 
+  // NOTE: the persistent console window that appears during a record is
+  // Playwright's own recordVideo ffmpeg encoder — bx cannot pass windowsHide
+  // into that internal spawn. The real fix is to drop recordVideo and capture
+  // via CDP Page.startScreencast on a single chosen page + our own ffmpeg
+  // (windowsHide:true), which would ALSO make Bug 1 structurally impossible
+  // (record one known tab instead of "record every page then guess"). See
+  // decisions.md. Not done here — this task keeps recordVideo and selects the
+  // driven tab by action activity in recordStop.
   await session.relaunch({ recordVideo: { dir: videoTmpDir, size: VIDEO_SIZE } });
 
   state = {
@@ -247,31 +310,47 @@ export async function recordStop(session: Session, outDir: string): Promise<Reco
   }));
 
   // 2. Grab the video handles before the context goes away: closing it is what
-  //    flushes the webm to disk.
+  //    flushes the webm to disk. Pair each page's video with its tab id NOW —
+  //    the relaunch below closes the pages, and the tab id is what lets us pick
+  //    the tab that was actually driven (step 3).
   const context = session.liveContext;
-  const videos = context ? context.pages().map((page) => page.video()) : [];
-  const handles = videos.filter((video) => video !== null);
+  const pageVideos = (context?.pages() ?? []).map((page) => ({
+    tab: session.tabIdOf(page),
+    video: page.video(),
+  }));
 
   await session.relaunch();
 
-  const sized: { file: string; bytes: number }[] = [];
-  for (const handle of handles) {
+  // 3. Select the captured tab by ACTION ACTIVITY, not byte size (see
+  //    selectRecordedVideo). Resolve each page's flushed webm, then let the
+  //    pure selector pick the driven tab and flag a wrong-tab capture.
+  const actionsByTab = tallyActionsByTab(entries);
+  const candidates: VideoCandidate[] = [];
+  for (const { tab, video } of pageVideos) {
+    if (!video) continue;
     try {
-      const file = await handle.path();
-      sized.push({ file, bytes: (await stat(file)).size });
+      const file = await video.path();
+      candidates.push({ tab, file, bytes: (await stat(file)).size });
     } catch {
       // A page that never painted may have no video; the others still count.
     }
   }
-  sized.sort((a, b) => b.bytes - a.bytes);
-  const source = sized[0];
-  if (!source || source.bytes === 0) {
+
+  const selection = selectRecordedVideo(candidates, actionsByTab);
+  if (!selection.ok) {
     state = null;
+    if (selection.reason === "wrong-tab") {
+      throw {
+        code: "internal",
+        message: `recording "${current.slug}" captured a tab with zero actions while ${selection.drivenActions} action(s) were driven on another tab — wrong tab captured`,
+      };
+    }
     throw {
       code: "internal",
       message: `no video was captured for "${current.slug}" — check that playwright's ffmpeg is installed`,
     };
   }
+  const source = selection.source;
 
   await mkdir(outDir, { recursive: true });
   const videoPath = path.join(outDir, "raw.webm");

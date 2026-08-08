@@ -187,6 +187,12 @@ Produces `recordings/<slug>/`: deduped keyframes, 3×3 contact sheets, and a
 `report.md` narrated by the action log (passwords redacted). Point the user at
 `report.md`.
 
+Recording follows the **driven tab**, not whichever tab is on screen — with
+several tabs open (e.g. a `bx agent` running in its own pinned tab) the captured
+video is the tab that received the actions, selected by action activity rather
+than file size. If the driven tab's video is somehow lost, `bx record stop`
+errors loudly instead of shipping a blank video from an idle tab.
+
 ## Artifacts
 
 - `flows/*.flow.ts` — typed regression tests; **commit them** to the project.

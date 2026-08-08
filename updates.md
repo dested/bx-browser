@@ -1,5 +1,23 @@
 # Updates
 
+## 2026-08-07 — Recording: capture the driven tab, not the biggest webm + windowsHide
+Fixed the critical wrong-tab bug: recordVideo writes one webm per page and
+recordStop picked the largest file, so a looping animation on an idle tab beat
+the agent's busy-but-static tab and silently shipped a blank walkthrough.
+Selection now goes by ACTION ACTIVITY (per-tab tally of the action log's `tab`
+stamp), bytes only break ties; extracted a pure `selectRecordedVideo` +
+`tallyActionsByTab` in record.ts and a loud wrong-tab guard (throws when the
+winning tab saw zero actions but another was driven). Added
+`Session.tabIdOf(page)` to pair each page's video with its tab before the
+relaunch closes them. Added `windowsHide:true` to runCommand (bx's own ffmpeg/
+harness spawns no longer flash cmd.exe); noted that the *persistent* encoder
+window is Playwright's own recordVideo ffmpeg and the real fix is CDP
+Page.startScreencast (deferred, see decisions.md). New browserless suite
+tests/record.test.ts (8 tests) locks in selection + guard; typecheck + flows
+suite green.
+Touched: src/daemon/record.ts, src/daemon/session.ts, tests/record.test.ts,
+decisions.md, cliffnotes.md, skill/SKILL.md, site/src/data/skill-source.ts
+
 ## 2026-08-07 — npm publish prep (bx-browser), bx install-skill, site v2 per walkthrough
 Package renamed bx-browser for npm (bin stays bx; bx/flow alias kept via
 tsconfig paths; LICENSE added; files whitelist verified via pack --dry-run).
