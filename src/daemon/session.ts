@@ -913,6 +913,29 @@ export class Session {
 
   async tabClose(cmd: CmdOf<"tabClose">): Promise<TabsResult> {
     const context = await this.ensureContext();
+
+    // Bulk cleanup. `others` keeps the active tab and nukes the rest; `all`
+    // nukes everything and leaves one fresh blank tab so the persistent context
+    // (and the daemon) survives instead of the browser closing under us.
+    if (cmd.scope !== undefined) {
+      const pages = context.pages();
+      const keep = cmd.scope === "others" ? (pages[this.activeIndex] ?? pages[0]) : undefined;
+      let closed = 0;
+      for (const page of [...pages]) {
+        if (page === keep) continue;
+        await page.close().catch(() => undefined);
+        closed++;
+      }
+      if (context.pages().length === 0) await context.newPage();
+      this.activeIndex = keep ? Math.max(0, context.pages().indexOf(keep)) : 0;
+      const what =
+        cmd.scope === "others"
+          ? `closed ${closed} other tab${closed === 1 ? "" : "s"}`
+          : `closed all ${closed} tab${closed === 1 ? "" : "s"}`;
+      this.appendAction(cmd, what, undefined, keep ? this.pageId(keep) : undefined);
+      return this.tabs();
+    }
+
     const page = await this.pageFor(cmd.tab);
     const before = context.pages();
     const closed = before.indexOf(page);

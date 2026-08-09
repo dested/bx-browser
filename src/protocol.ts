@@ -223,7 +223,10 @@ export const CmdSchema = z.discriminatedUnion("cmd", [
   // into a tab an agent just made.
   z.object({ cmd: z.literal("tabNew"), url: z.string().optional(), background: z.boolean().optional() }),
   z.object({ cmd: z.literal("tabSelect"), index: z.number().int().nonnegative() }),
-  z.object({ cmd: z.literal("tabClose"), ...tabPin }),
+  // scope omitted: close the pinned/active tab (the original behavior).
+  // "others": close every tab but the active one. "all": close every tab,
+  // leaving a single blank tab so the context (and daemon) stays alive.
+  z.object({ cmd: z.literal("tabClose"), scope: z.enum(["others", "all"]).optional(), ...tabPin }),
   z.object({ cmd: z.literal("recordStart"), slug: z.string().regex(/^[a-z0-9-]+$/) }),
   z.object({ cmd: z.literal("recordStop"), outDir: z.string() }), // absolute dir for the package
   z.object({ cmd: z.literal("status") }),

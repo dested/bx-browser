@@ -1,6 +1,6 @@
 # bx — cliffnotes
 
-Last updated: 2026-08-07
+Last updated: 2026-08-08
 
 Purpose-built browser automation for Claude Code. A per-profile **daemon**
 (runs under **Node** — not Bun; see decisions.md) holds one real Chrome via
@@ -96,6 +96,11 @@ Dockerfile, drydock.yaml, .github/  DRYDOCK-MANAGED (portal regenerates — don'
   CLI/docs the former. Local disk only; recordings/ is gitignored.
 - expect returns pass:false as ok:true data — only the CLI turns it into exit 1.
 - One daemon per profile; ~/.bx/run/<profile>.json is the discovery file.
+- `bx tab close --all` reopens one blank tab after closing every page — closing
+  the last page of a persistent context can take the browser (and the daemon's
+  usable context) down with it, so the blank keeps the context alive. Don't drop
+  it. `--others` keeps the active tab; plain `tab close` is unchanged. Agent tabs
+  are auto-closed by the driver's finally (tools.ts `pin.close()`), not by these.
 
 ## Routes / URLs
 

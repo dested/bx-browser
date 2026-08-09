@@ -1,5 +1,15 @@
 # Updates
 
+## 2026-08-08 — Bulk tab cleanup: `bx tab close --others|--all` + spec mandate
+Hand-driving left tabs piling up in the real Chrome window (the `bx agent` path
+already force-closes its own tab in a finally). Added `scope: "others"|"all"` to
+the `tabClose` cmd: `--others` keeps the active tab and closes the rest, `--all`
+closes every tab and reopens one blank tab so the persistent context/daemon
+survives. SKILL.md gained a "Clean up when you're done" section (and notes that
+`bx agent` auto-cleans, so a leftover agent tab means a killed daemon).
+Touched: src/protocol.ts, src/daemon/session.ts (tabClose), src/cli.ts (parse +
+usage + help), skill/SKILL.md. Verified live on profile bxtest; typecheck green.
+
 ## 2026-08-07 — Recording: capture the driven tab, not the biggest webm + windowsHide
 Fixed the critical wrong-tab bug: recordVideo writes one webm per page and
 recordStop picked the largest file, so a looping animation on an idle tab beat

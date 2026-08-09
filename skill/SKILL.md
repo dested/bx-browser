@@ -91,7 +91,7 @@ text — in that order.
 | text / js | `bx text [selector]` · `bx js <expr>` | budgeted reads |
 | console / net | `bx console [--filter <re>]` · `bx net --failed` | errors first |
 | snap | `bx snap [path] [--full]` | downscaled PNG path — `Read` it only if needed |
-| tabs | `bx tabs` / `bx tab <n>` / `bx tab new [url]` / `bx tab close` | |
+| tabs | `bx tabs` · `bx tab <n>` · `bx tab new [url]` · `bx tab close [--others\|--all]` | `--others` keeps the active tab, `--all` closes every tab — clean up when done |
 | run | `bx run <flow.ts> [--record]` | replay a flow; zero model tokens |
 | drive | `bx drive --install "<js>" --until "<expr>" [--timeout <ms>] [--poll <ms>]` | in-page controller + poll; exit 1 on timeout |
 | agent | `bx agent "<task>" [--model haiku\|sonnet\|opus] [--opus] [--save <n>] [--max-turns <n>] [--budget <usd>] [--max-wall <s>] [--url <u>] [--enter <js>] [--win <expr>] [--verbose]` | delegate |
@@ -101,6 +101,28 @@ text — in that order.
 Global flags: `--profile <name>` (default `default`), `--headless`, `--json`
 (includes an `ms` timing field), `--timeout <ms>`. `BX_TIMING=1` prints wall
 time to stderr per command. The daemon starts on first use, one per profile.
+
+## Clean up when you're done
+
+The browser is persistent — tabs you open by hand stay open across commands and
+across sessions until something closes them. Leaving a pile behind is a mess for
+whoever is watching the real Chrome window. So, at the end of a hand-driven
+task:
+
+```bash
+bx tab close            # close the one tab you were driving
+bx tab close --others   # done exploring across several tabs — keep this one, close the rest
+bx tab close --all      # wipe every tab back to a single blank one
+```
+
+`bx open` reuses the active tab (it navigates, it does not spawn a tab), so a
+straightforward open→check→verify leaves nothing to clean up. It's `bx tab new`
+and multi-tab exploration that accumulate — close them before you report done.
+
+**`bx agent` cleans up after itself:** every run drives its own tab and closes
+it automatically when it finishes, pass or fail. You never close agent tabs by
+hand — a leftover agent tab means the daemon was killed mid-run, so
+`bx tab close --others` (or `bx stop`) is the recovery.
 
 ## Canvas, games, non-semantic UIs
 

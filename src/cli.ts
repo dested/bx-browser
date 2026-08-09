@@ -57,7 +57,7 @@ Navigation
   tabs                             list open tabs
   tab <n>                          switch to tab n
   tab new [url]                    open a new tab
-  tab close                        close the active tab
+  tab close [--others|--all]       close the active tab; --others keeps it, --all closes every tab
 
 Observation
   els [--all] [--filter <text>]    interactive elements as [ref] role "name"
@@ -709,7 +709,14 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
         );
       }
       if (sub === "close") {
-        return send<TabsResult>(g, { cmd: "tabClose" }, renderTabChange("closed tab", ""));
+        const all = takeFlag(args, "--all");
+        const others = takeFlag(args, "--others");
+        if (all && others) {
+          throw new CliError(2, "bx tab close: pass at most one of --all, --others");
+        }
+        const scope = all ? "all" : others ? "others" : undefined;
+        const verb = scope === "all" ? "closed all tabs" : scope === "others" ? "closed other tabs" : "closed tab";
+        return send<TabsResult>(g, { cmd: "tabClose", scope }, renderTabChange(verb, ""));
       }
       if (sub !== undefined && /^\d+$/.test(sub)) {
         const index = Number(sub);
@@ -719,7 +726,10 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
           renderTabChange("switched to tab", String(index)),
         );
       }
-      throw new CliError(2, "usage: bx tab <n> | bx tab new [url] | bx tab close");
+      throw new CliError(
+        2,
+        "usage: bx tab <n> | bx tab new [url] | bx tab close [--others | --all]",
+      );
     }
 
     case "run": {
