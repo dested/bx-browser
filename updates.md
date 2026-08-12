@@ -1,5 +1,17 @@
 # Updates
 
+## 2026-08-12 — Doc: `bx click` is a trusted click, not synthetic (SPA/Next Link)
+A filming note claimed bx's "synthetic click doesn't fire Next's `<Link>` router."
+Disproven: `bx click` is Playwright `locator.click()` = a trusted CDP click
+(`isTrusted=true`); the only synthetic dispatch in bx is the pointer-drag helper,
+which `click` never uses. Repro against a Link-mimic fixture (delegated onClick +
+preventDefault + history route) showed the click fired the handler and routed
+(`isTrusted=true`). No code change — the click path is correct. Added a clarifying
+note to SKILL.md (Notes) and a cliffnotes Gotcha: an in-app link that "doesn't
+navigate" under bx is app/timing-specific (popover unmounting the anchor on
+mousedown; or reading state before the async client transition settled), verify
+with `expect url`/`expect text`, not a bare `js location.pathname`.
+
 ## 2026-08-08 — Bulk tab cleanup: `bx tab close --others|--all` + spec mandate
 Hand-driving left tabs piling up in the real Chrome window (the `bx agent` path
 already force-closes its own tab in a finally). Added `scope: "others"|"all"` to

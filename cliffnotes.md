@@ -1,6 +1,6 @@
 # bx — cliffnotes
 
-Last updated: 2026-08-08
+Last updated: 2026-08-12
 
 Purpose-built browser automation for Claude Code. A per-profile **daemon**
 (runs under **Node** — not Bun; see decisions.md) holds one real Chrome via
@@ -80,6 +80,16 @@ Dockerfile, drydock.yaml, .github/  DRYDOCK-MANAGED (portal regenerates — don'
 - Rare under load: Chrome accepts a click (Playwright reports success) but no
   DOM event fires; vanishes on re-run. Re-run a burst of click-flavored smoke
   failures before believing them.
+- `click` is Playwright `locator.click()` — a **trusted** CDP click
+  (`isTrusted=true`), NOT a synthetic `dispatchEvent`/`el.click()` (the only
+  synthetic dispatch is the pointer-drag helper at session.ts ~786, which `click`
+  never touches). It drives React delegation and SPA/Next `<Link>` routers exactly
+  like a human click — proven against a Link-mimic fixture (delegated onClick
+  fired, preventDefault ran, history route happened). So "bx doesn't follow an
+  in-app link, a real click does" is app/timing-specific (popover unmounting the
+  anchor on mousedown; or state read before the async client transition settled),
+  never a harness synthetic-click limitation. Verify routes with `expect url`/
+  `expect text` (they retry), not a bare `js location.pathname` right after.
 - `video-to-prompt` (git dep) ships no dist; scripts/build-harness.ts builds it
   in place on demand. Durable fix = `prepare` script in that repo (user's).
 - Recording relaunches the browser context twice (video is a context-creation

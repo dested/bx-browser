@@ -232,6 +232,15 @@ errors loudly instead of shipping a blank video from an idle tab.
 - First run of a profile: the user signs in once by hand; state persists.
 - A failing `expect` waits its full timeout (default 5s) — pass `--timeout 500`
   when probing for absence.
+- `bx click` is a **trusted** click (CDP-dispatched, `isTrusted=true`), not a
+  synthetic `el.click()`/`dispatchEvent` — it drives React's event delegation and
+  SPA client routers (Next `<Link>`, etc.) exactly like a human click. If an
+  in-app link *seems* not to navigate, that's app/timing-specific — a popover
+  unmounting the anchor on `mousedown`, or state read before the async client
+  transition settled — **not** a harness synthetic-click limitation. Confirm the
+  route with `expect url /path/` or `expect text …` (they retry until timeout);
+  a bare `js location.pathname` right after the click can read the pre-transition
+  URL and lie.
 - Where bx wins, honestly: on an app that exposes state and hooks — your own
   instrumented app, the intended audience — bx beats screenshot agents
   decisively: real state reads, real-time driving via in-page controllers,
