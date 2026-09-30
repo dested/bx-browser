@@ -7,6 +7,8 @@
 // cannot drive Chrome from Bun, so the daemon must be able to run under Node.
 // See the launch notes in session.ts.
 
+// Must stay first: patches child_process before Playwright spawns anything.
+import "./hideWindows.ts";
 import { randomBytes } from "node:crypto";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
