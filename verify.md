@@ -2,7 +2,12 @@
 
 - **[cheap] Typecheck:** `bun x tsc --noEmit` — must be silent. Always run.
 - **[cheap] CLI alive:** `bun src/cli.ts help` exits 0.
-- **[medium] Smoke suite:** `bun test tests/smoke.test.ts` — 10 tests, ~5s,
+- **[cheap] Debug surface:** with a daemon up (`bx els` spawns one),
+  `curl -s -H "x-bx-token: <token>" http://127.0.0.1:<port>/debug`
+  using `token`/`port` from ~/.bx/run/<profile>.json — expect `"ok":true`,
+  `gcExposed:true`, the last command in `recent` with your Claude session in
+  `clients`. Or just run `destedtui --bx` and look.
+- **[medium] Smoke suite:** `bun test tests/smoke.test.ts` — 21 tests, ~11s,
   boots a headless daemon on profile "bxtest", drives the fixture app.
   Run after touching daemon/, cli, client, or flows.
 - **[medium] Bench:** `bun run bench` — writes bench-results.json; compare

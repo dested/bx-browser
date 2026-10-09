@@ -17,6 +17,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   BX_DIR_NAME,
+  CLIENT_HEADER,
   CmdSchema,
   LOGS_DIR,
   PROFILES_DIR,
@@ -30,6 +31,7 @@ import {
 } from "../protocol.ts";
 import { Session } from "./session.ts";
 import { harnessRoutes, recordStart, recordStop, recordingSlug } from "./record.ts";
+import { collectDebug, heapSnapshot, Journal, parseClientTag, runGc } from "./debug.ts";
 
 const ERROR_CODES: readonly string[] = [
   "target_not_found",
@@ -124,6 +126,8 @@ for (const dir of [RUN_DIR, PROFILES_DIR, SNAPS_DIR, LOGS_DIR]) {
 
 const token = randomBytes(24).toString("hex");
 const session = new Session({ profile, headless });
+const journal = new Journal();
+const bootAt = Date.now();
 
 async function dispatch(cmd: Cmd): Promise<unknown> {
   switch (cmd.cmd) {
@@ -285,20 +289,56 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       return;
     }
     const cmd = parsed.data;
-    inFlight++;
+    const id = journal.begin(cmd, parseClientTag(req.headers[CLIENT_HEADER]));
+    let failure: BxError | null = null;
     try {
       const data = await dispatch(cmd);
       log(`${cmd.cmd} ok`);
       sendJson(res, { ok: true, data } satisfies CmdResult);
     } catch (err) {
-      const error = toBxError(err);
-      log(`${cmd.cmd} failed: ${error.code} ${error.message}`);
-      sendJson(res, fail(error));
+      failure = toBxError(err);
+      log(`${cmd.cmd} failed: ${failure.code} ${failure.message}`);
+      sendJson(res, fail(failure));
     } finally {
-      inFlight--;
+      journal.end(id, failure);
       lastActivity = Date.now();
     }
     return;
+  }
+
+  // The debug surface leaves lastActivity alone on purpose: a monitor polling
+  // /debug must not keep an idle daemon alive.
+  if (pathname === "/debug" || pathname.startsWith("/debug/")) {
+    if (!authorized) {
+      sendJson(res, fail({ code: "bad_request", message: "bad token" }), 401);
+      return;
+    }
+    if (pathname === "/debug" && method === "GET") {
+      const data = await collectDebug({
+        session,
+        journal,
+        profile,
+        headless,
+        startedAt: bootAt,
+        recording: recordingSlug(),
+        lastActivityAt: lastActivity,
+        idleLimitMs: idleLimit,
+      });
+      sendJson(res, { ok: true, data } satisfies CmdResult);
+      return;
+    }
+    if (pathname === "/debug/gc" && method === "POST") {
+      const data = runGc();
+      log(`debug gc: ${data.ran ? `heap ${data.heapBefore} -> ${data.heapAfter}` : "not exposed (no --expose-gc)"}`);
+      sendJson(res, { ok: true, data } satisfies CmdResult);
+      return;
+    }
+    if (pathname === "/debug/heapsnapshot" && method === "POST") {
+      const data = await heapSnapshot(profile);
+      log(`debug heap snapshot: ${data.path} (${data.bytes} bytes, ${data.ms}ms)`);
+      sendJson(res, { ok: true, data } satisfies CmdResult);
+      return;
+    }
   }
 
   send(res, 404, "text/plain; charset=utf-8", "not found");
@@ -309,7 +349,6 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 // up by the dozen. BX_IDLE_MINUTES overrides the default; 0 disables.
 const DEFAULT_IDLE_MINUTES = 15;
 const IDLE_CHECK_MS = 30_000;
-let inFlight = 0;
 let lastActivity = Date.now();
 
 function idleLimitMs(): number {
@@ -322,7 +361,7 @@ function idleLimitMs(): number {
 const idleLimit = idleLimitMs();
 if (idleLimit > 0) {
   setInterval(() => {
-    if (inFlight > 0 || recordingSlug() !== null) return;
+    if (journal.inFlightCount > 0 || recordingSlug() !== null) return;
     if (Date.now() - lastActivity >= idleLimit) {
       void shutdown(`idle for ${idleLimit / 60_000} min`);
     }

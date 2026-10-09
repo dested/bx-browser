@@ -6,9 +6,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { z } from "zod";
-import { BX_DIR_NAME, LOGS_DIR, PROFILES_DIR, RUN_DIR, SNAPS_DIR } from "./protocol.ts";
+import { BX_DIR_NAME, CLIENT_HEADER, LOGS_DIR, PROFILES_DIR, RUN_DIR, SNAPS_DIR } from "./protocol.ts";
 import type {
   ActionResult,
+  ClientTag,
   Cmd,
   CmdResult,
   ConsoleEntry,
@@ -135,9 +136,11 @@ export async function ensureDaemon(
     // with detached:true (Bun.spawn children on Windows die with the parent
     // process, killing the daemon as soon as the CLI exits).
     const { spawn } = await import("node:child_process");
+    // --expose-gc lets a monitor force a collection (POST /debug/gc) to tell a
+    // real leak from garbage that simply hasn't been collected yet.
     const proc = spawn(
       "node",
-      [entry, "--profile", profile, ...(opts.headless ? ["--headless"] : [])],
+      ["--expose-gc", entry, "--profile", profile, ...(opts.headless ? ["--headless"] : [])],
       { detached: true, stdio: ["ignore", fd, fd], windowsHide: true },
     );
     proc.unref();
@@ -255,10 +258,28 @@ const EnvelopeSchema = z.discriminatedUnion("ok", [
   }),
 ]);
 
+let clientVia: string | undefined;
+
+/** The bx verb this process is running ("click", "agent", "run"…), for the daemon's client tag. */
+export function setClientVia(verb: string): void {
+  clientVia = verb;
+}
+
+/** Tells the daemon who is driving it, so a monitor can show it (see CLIENT_HEADER). */
+function clientTag(): string {
+  const tag: ClientTag = {
+    session: process.env["CLAUDE_CODE_SESSION_ID"] || undefined,
+    cwd: process.cwd(),
+    pid: process.pid,
+    via: clientVia,
+  };
+  return encodeURIComponent(JSON.stringify(tag));
+}
+
 async function post<T>(run: RunFile, c: Cmd): Promise<CmdResult<T>> {
   const res = await fetch(`http://127.0.0.1:${run.port}/cmd`, {
     method: "POST",
-    headers: { "content-type": "application/json", "x-bx-token": run.token },
+    headers: { "content-type": "application/json", "x-bx-token": run.token, [CLIENT_HEADER]: clientTag() },
     body: JSON.stringify(c),
   });
   const parsed = EnvelopeSchema.safeParse(await res.json());

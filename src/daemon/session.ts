@@ -14,6 +14,9 @@ import {
   type ActionResult,
   type Cmd,
   type ConsoleEntry,
+  type DebugPage,
+  type DebugPageMetrics,
+  type DebugResult,
   type DriveResult,
   type El,
   type ElsResult,
@@ -41,7 +44,7 @@ import {
   type Buffers,
 } from "./observe.ts";
 import { recordingSlug } from "./record.ts";
-import type { BrowserContext, Locator, Page } from "playwright-core";
+import type { BrowserContext, CDPSession, Locator, Page } from "playwright-core";
 
 type CmdOf<K extends Cmd["cmd"]> = Extract<Cmd, { cmd: K }>;
 
@@ -123,6 +126,8 @@ export class Session {
   private readonly actions: ActionLogEntry[] = [];
   private readonly buffers: Buffers;
   private readonly startedAt = Date.now();
+  /** Opened on the first /debug read of a page, never by ordinary commands. */
+  private readonly metricSessions = new WeakMap<Page, Promise<CDPSession>>();
 
   constructor(opts: SessionOptions) {
     this.profile = opts.profile;
@@ -967,6 +972,73 @@ export class Session {
       pages,
       recording: recordingSlug(),
       uptimeMs: Date.now() - this.startedAt,
+    };
+  }
+
+  /** Pages with Chrome's counters, plus the sizes of everything this session keeps. */
+  async debugInfo(): Promise<Pick<DebugResult, "pages" | "internals">> {
+    const pages = this.context?.pages() ?? [];
+    const out = await Promise.all(
+      pages.map(async (page): Promise<DebugPage> => {
+        const [info, metrics] = await Promise.all([this.pageInfo(page), this.pageMetrics(page)]);
+        return {
+          tab: info.id,
+          url: info.url,
+          title: info.title,
+          active: info.active,
+          metrics,
+          refs: this.refs.get(info.id)?.entries.size ?? 0,
+        };
+      }),
+    );
+    let actionLogChars = 0;
+    for (const a of this.actions) actionLogChars += a.text.length + a.cmdJson.length + (a.stableTarget?.length ?? 0);
+    let refEntries = 0;
+    for (const r of this.refs.values()) refEntries += r.entries.size;
+    return {
+      pages: out,
+      internals: {
+        actionLog: this.actions.length,
+        actionLogChars,
+        refPages: this.refs.size,
+        refEntries,
+        consolePushed: this.buffers.console.length,
+        netPushed: this.buffers.net.length,
+        ringCap: BUDGET.RING_BUFFER_SIZE,
+      },
+    };
+  }
+
+  private async pageMetrics(page: Page): Promise<DebugPageMetrics | null> {
+    const context = this.context;
+    if (!context || page.isClosed()) return null;
+    let pending = this.metricSessions.get(page);
+    if (!pending) {
+      pending = context.newCDPSession(page).then(async (s) => {
+        await s.send("Performance.enable");
+        return s;
+      });
+      this.metricSessions.set(page, pending);
+    }
+    const read = pending.then((s) => s.send("Performance.getMetrics"));
+    const answer = await Promise.race([read, sleep(800).then(() => null)]).catch(() => {
+      // The session died with a navigation or crash; open a fresh one next read.
+      this.metricSessions.delete(page);
+      return null;
+    });
+    if (!answer) return null;
+    const m = new Map(answer.metrics.map((x) => [x.name, x.value]));
+    const n = (name: string): number => m.get(name) ?? 0;
+    return {
+      jsHeapUsed: n("JSHeapUsedSize"),
+      jsHeapTotal: n("JSHeapTotalSize"),
+      nodes: n("Nodes"),
+      documents: n("Documents"),
+      listeners: n("JSEventListeners"),
+      frames: n("Frames"),
+      layoutCount: n("LayoutCount"),
+      scriptMs: Math.round(n("ScriptDuration") * 1000),
+      taskMs: Math.round(n("TaskDuration") * 1000),
     };
   }
 

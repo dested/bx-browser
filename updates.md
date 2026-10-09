@@ -1,5 +1,15 @@
 # Updates
 
+## 2026-10-08 — /debug surface for the destedtui bx monitor
+Asked for a live TUI of every bx daemon (memory, activity, who's driving) to chase
+leaks. Daemon side: `daemon/debug.ts` journals every /cmd (in flight, last 200,
+per-verb totals, clients from the new `x-bx-client` header) and serves GET /debug
+with node memory/cpu/event-loop, per-page CDP metrics and internal sizes; POST
+/debug/gc and /debug/heapsnapshot. Daemons spawn with `--expose-gc`. Reading
+/debug isn't activity. The TUI is in destedtui (`destedtui --bx` / `bxtop`).
+Smoke 21/21, tsc clean. Board #509.
+Touched: src/protocol.ts, src/daemon/{debug,daemon,session}.ts, src/client.ts, src/cli.ts
+
 ## 2026-09-30 — No more terminal windows during bx record
 Every `bx record` opened a terminal: Playwright spawns its recordVideo ffmpeg without
 windowsHide, and with Windows Terminal as the default console the new console shows

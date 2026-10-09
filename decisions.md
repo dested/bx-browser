@@ -2,6 +2,24 @@
 
 Newest first. Append-only; supersede, never delete.
 
+## 2026-10-08 — The daemon serves /debug; the monitor lives in destedtui
+
+**Why:** Hunting memory growth across a dozen daemons needs what only the daemon
+knows: what's in flight, who sent it, per-page DOM/heap counters, ring and
+action-log sizes. A process scan alone sees memory, not cause. So the daemon
+keeps a bounded journal (last 200 commands, 50 clients) and serves it at GET
+/debug, with POST /debug/gc and /debug/heapsnapshot for one-key experiments.
+The TUI that reads it is a destedtui screen (`--bx`), next to the Procs screen
+and its Win32 process scanner, not a bx verb. Reading /debug never counts as
+activity, so watching doesn't defeat the idle exit. Callers identify themselves
+through `x-bx-client` (Claude session id, else cwd) instead of a registration
+step.
+**Rejected:** a `bx top` verb inside bx (bx stays the automation tool; the
+process-tree and session-label code already lives in destedtui); streaming
+/debug over SSE (2s polling of a few KB is plenty and survives daemon
+restarts); logging every command to disk in the daemon (the monitor's
+`--log` memlog covers trend capture without adding daemon I/O).
+
 ## 2026-09-29 — Seed Chrome's OS-password check; idle daemons exit after 15 min
 
 **Why:** On Windows, Chrome checks whether the OS account has a blank password by

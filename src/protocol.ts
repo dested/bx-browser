@@ -451,9 +451,123 @@ export interface AgentReport {
 //   POST /harness/result        → { path, base64 } one file written under the package dir
 //   POST /harness/done          → harness signals the distill finished
 //   POST /harness/error         → { message } harness signals the distill failed
+//   GET  /debug, POST /debug/gc, POST /debug/heapsnapshot → see "Debug surface"
 // ---------------------------------------------------------------------------
 
 export interface HealthResult { ok: true; profile: string; browserRunning: boolean }
+
+// ---------------------------------------------------------------------------
+// Debug surface, for monitors outside bx (destedtui's `bx` screen). All three
+// need the x-bx-token header and answer with a CmdResult envelope.
+//   GET  /debug               → DebugResult
+//   POST /debug/gc            → DebugGcResult (daemons are spawned with --expose-gc)
+//   POST /debug/heapsnapshot  → DebugHeapSnapshotResult (stalls the daemon for seconds)
+// Reading /debug never counts as activity: a monitor left open must not keep
+// an idle daemon from exiting. Monitors parse this with their own schema, so
+// changes are additive only: add fields, never rename or retype one.
+// ---------------------------------------------------------------------------
+
+export const DEBUG_VERSION = 1;
+export const HEAPS_DIR = "heaps"; // ~/.bx/heaps/<profile>-<ts>.heapsnapshot
+
+// Who sent a /cmd. The CLI tags every request so a monitor can say which
+// Claude session (or terminal) is driving which daemon. Sent as
+// encodeURIComponent(JSON.stringify(tag)); a missing or bad tag is ignored.
+export const CLIENT_HEADER = "x-bx-client";
+export const ClientTagSchema = z.object({
+  session: z.string().optional(), // the caller's CLAUDE_CODE_SESSION_ID
+  cwd: z.string().optional(),
+  pid: z.number().int().optional(),
+  via: z.string().optional(), // the bx verb that sent it: "click", "agent", "run"…
+});
+export type ClientTag = z.infer<typeof ClientTagSchema>;
+
+export interface DebugCmd {
+  id: number; // monotonic per daemon
+  cmd: CmdName;
+  summary: string; // `click "Save"`, `open https://…`; fill/select values never appear
+  tab?: number;
+  client?: string; // DebugClient.key
+  startedAt: number; // epoch ms
+}
+export interface DebugCmdDone extends DebugCmd {
+  ms: number;
+  ok: boolean;
+  error?: string; // "<code>: <message>", truncated
+}
+export interface DebugClient {
+  key: string; // the session id, else the cwd, else "anonymous"
+  session?: string;
+  cwd?: string;
+  pid?: number; // the most recent sender's pid
+  via?: string; // the most recent verb
+  firstSeen: number;
+  lastSeen: number;
+  commands: number;
+}
+// Chrome's own counters for a page (CDP Performance.getMetrics).
+export interface DebugPageMetrics {
+  jsHeapUsed: number;
+  jsHeapTotal: number;
+  nodes: number;
+  documents: number;
+  listeners: number;
+  frames: number;
+  layoutCount: number;
+  scriptMs: number; // cumulative
+  taskMs: number; // cumulative
+}
+export interface DebugPage {
+  tab: number;
+  url: string;
+  title: string;
+  active: boolean;
+  metrics: DebugPageMetrics | null; // null: the page didn't answer in time (busy, navigating)
+  refs: number; // this page's ref registry size
+}
+export interface DebugResult {
+  v: number; // DEBUG_VERSION
+  profile: string;
+  pid: number;
+  headless: boolean;
+  startedAt: number; // epoch ms
+  uptimeMs: number;
+  node: {
+    version: string;
+    rss: number;
+    heapUsed: number;
+    heapTotal: number;
+    external: number;
+    arrayBuffers: number;
+    cpuUserMs: number; // cumulative: diff two reads for a rate
+    cpuSystemMs: number;
+    loopDelayMs: { mean: number; p99: number; max: number }; // since the previous /debug read
+    gcExposed: boolean;
+  };
+  browserRunning: boolean;
+  recording: string | null;
+  idle: { lastActivityAt: number; limitMs: number }; // limitMs 0 = never exits on idle
+  inFlight: DebugCmd[];
+  recent: DebugCmdDone[]; // newest last, capped
+  totals: {
+    commands: number;
+    errors: number;
+    byCmd: Record<string, { n: number; errors: number; ms: number }>;
+  };
+  clients: DebugClient[];
+  internals: {
+    actionLog: number; // entries; the action log is never trimmed
+    actionLogChars: number;
+    refPages: number;
+    refEntries: number;
+    consolePushed: number; // lifetime pushes into the console ring
+    netPushed: number;
+    ringCap: number;
+  };
+  pages: DebugPage[];
+}
+export interface DebugGcResult { ran: boolean; heapBefore: number; heapAfter: number }
+export interface DebugHeapSnapshotResult { path: string; bytes: number; ms: number }
 
 // Exit codes used by the CLI: 0 success, 1 command/expect failure, 2 usage
 // error, 3 daemon/browser failure.

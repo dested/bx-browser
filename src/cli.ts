@@ -19,6 +19,7 @@ import {
   readRunFile,
   renderEl,
   renderPage,
+  setClientVia,
   stopAllDaemons,
   stopDaemon,
 } from "./client.ts";
@@ -941,6 +942,7 @@ async function main(argv: string[]): Promise<number> {
   }
 
   startedAt = performance.now();
+  setClientVia(command);
   let code: number;
   try {
     code = await dispatch(globals, command, args);

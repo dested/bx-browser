@@ -1,6 +1,6 @@
 # bx — cliffnotes
 
-Last updated: 2026-09-29
+Last updated: 2026-10-08
 
 Purpose-built browser automation for Claude Code. A per-profile **daemon**
 (runs under **Node** — not Bun; see decisions.md) holds one real Chrome via
@@ -15,8 +15,10 @@ src/
   cli.ts             bx entry — arg parsing, dispatch, human output, exit codes
   client.ts          daemon discovery/spawn (node, detached), cmd<T>(), parseTarget
   daemon/            ⚠ Node runtime: no Bun.*, no non-erasable TS syntax
-    daemon.ts        node:http server, routes (/health /cmd /shutdown /fixture /harness*)
-    session.ts       browser lifecycle, target resolution, action log, ref registry
+    daemon.ts        node:http server, routes (/health /cmd /debug* /shutdown /fixture /harness*)
+    session.ts       browser lifecycle, target resolution, action log, ref registry, debugInfo (per-page CDP metrics)
+    debug.ts         /debug: Journal of every /cmd (in flight, last 200, totals, clients), process + loop counters, gc, heap snapshot
+    hideWindows.ts   forces windowsHide on every child_process.spawn (imported first; stops ffmpeg console windows)
     distill.ts       els: DOM scan → numbered elements, budget-capped rendering
     observe.ts       console/net ring buffers, per-action error marks
     osPassword.ts    pre-launch seed of Chrome's OS blank-password cache (stops failed Windows logons)
@@ -55,6 +57,7 @@ Dockerfile, drydock.yaml, .github/  DRYDOCK-MANAGED (portal regenerates — don'
 | Agent behavior/system prompt | agent/driver.ts |
 | Flow verbs | flows/api.ts (+ synthesize.ts mapping) |
 | Recording/distill package | daemon/record.ts + daemon/harness/harness.ts |
+| What a monitor sees (/debug payload) | protocol.ts "Debug surface" types, daemon/debug.ts collectDebug, session.ts debugInfo |
 
 ## Runtime split (the #1 gotcha)
 
@@ -120,11 +123,26 @@ Dockerfile, drydock.yaml, .github/  DRYDOCK-MANAGED (portal regenerates — don'
   usable context) down with it, so the blank keeps the context alive. Don't drop
   it. `--others` keeps the active tab; plain `tab close` is unchanged. Agent tabs
   are auto-closed by the driver's finally (tools.ts `pin.close()`), not by these.
+- `/debug` has an outside consumer: destedtui's bx screen (`destedtui --bx`,
+  `bxtop`, G:\code\destedtui src/lib/bx.ts) parses it with its own zod mirror.
+  Keep changes additive (new optional fields are fine; renames and removals
+  break it) and bump `DEBUG_VERSION` for a breaking change. Reading /debug must
+  never touch `lastActivity`, or a monitor keeps every daemon alive forever.
+- Every CLI request carries `x-bx-client` (Claude session id, cwd, pid, verb)
+  so /debug can say who drives a daemon. It's informational: the daemon never
+  rejects a request over it.
+- Daemons spawn with `--expose-gc` (client.ts) so /debug/gc can force a full
+  collection; a daemon from before 2026-10-08 reports `gcExposed: false`, and
+  an older one 404s /debug entirely ("old daemon" in the monitor).
+- Session.actions (the action log behind `bx flow`/synthesis) is never trimmed.
+  /debug reports its length and chars; it's the first suspect if a long-lived
+  daemon's node heap grows.
 
 ## Routes / URLs
 
 - Daemon: 127.0.0.1:<random port> — /health, /cmd (token), /shutdown (token),
-  /fixture/* (TaskBox), /harness* (recording distill page).
+  /debug, /debug/gc, /debug/heapsnapshot (token; heap snapshots land in
+  ~/.bx/heaps/), /fixture/* (TaskBox), /harness* (recording distill page).
 - Fixture views: #/login (demo@taskbox.test / hunter2), #/tasks, #/settings,
   #/game (canvas mini-game: window.__game state, keys hook, pointer shelf).
 
