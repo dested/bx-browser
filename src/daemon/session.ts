@@ -30,6 +30,7 @@ import {
   type TextResult,
 } from "../protocol.ts";
 import { distillPage, renderEls, type DistillResult } from "./distill.ts";
+import { seedOsPasswordCheck } from "./osPassword.ts";
 import {
   RingBuffer,
   attachObservers,
@@ -147,6 +148,9 @@ export class Session {
   private async ensureContext(): Promise<BrowserContext> {
     if (this.context) return this.context;
     const { chromium } = await import("playwright-core");
+    // Must precede every launch: a cold profile makes Chrome probe the Windows
+    // password with a failed logon, and enough of those lock the account.
+    console.log(`[${new Date().toISOString()}] ${seedOsPasswordCheck(this.profileDir)}`);
     let context: BrowserContext;
     try {
       context = await chromium.launchPersistentContext(this.profileDir, {
@@ -1019,6 +1023,7 @@ export class Session {
     if (previous) await previous.close().catch(() => undefined);
 
     const { chromium } = await import("playwright-core");
+    console.log(`[${new Date().toISOString()}] ${seedOsPasswordCheck(this.profileDir)}`);
     let context: BrowserContext;
     try {
       context = await chromium.launchPersistentContext(this.profileDir, {

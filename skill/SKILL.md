@@ -96,7 +96,7 @@ text — in that order.
 | drive | `bx drive --install "<js>" --until "<expr>" [--timeout <ms>] [--poll <ms>]` | in-page controller + poll; exit 1 on timeout |
 | agent | `bx agent "<task>" [--model haiku\|sonnet\|opus] [--opus] [--save <n>] [--max-turns <n>] [--budget <usd>] [--max-wall <s>] [--url <u>] [--enter <js>] [--win <expr>] [--verbose]` | delegate |
 | record | `bx record start <slug>` / `bx record stop` | video → narrated package |
-| admin | `bx status` / `bx profiles` / `bx stop` | daemon lifecycle |
+| admin | `bx status` / `bx profiles` / `bx stop [--all]` | daemon lifecycle; idle daemons exit after 15 min |
 
 Global flags: `--profile <name>` (default `default`), `--headless`, `--json`
 (includes an `ms` timing field), `--timeout <ms>`. `BX_TIMING=1` prints wall
@@ -123,6 +123,16 @@ and multi-tab exploration that accumulate — close them before you report done.
 it automatically when it finishes, pass or fail. You never close agent tabs by
 hand — a leftover agent tab means the daemon was killed mid-run, so
 `bx tab close --others` (or `bx stop`) is the recovery.
+
+**Stop the daemon when you're finished, and reuse profile names.** Each profile
+is its own daemon plus its own Chrome, and they don't go away when your task
+ends. When you're done with a profile, run `bx --profile <name> stop`. Idle
+daemons also exit on their own after 15 minutes (`BX_IDLE_MINUTES`, `0` =
+never). `bx stop --all` stops every daemon at once. Don't invent a fresh
+`--profile` name for every check: reuse the project's existing profiles, and
+create a new one only when you truly need separate logins or concurrent
+sessions. Every new profile is a new Chrome data directory that has to warm up
+from cold.
 
 ## Canvas, games, non-semantic UIs
 

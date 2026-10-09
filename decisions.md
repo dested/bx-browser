@@ -2,6 +2,30 @@
 
 Newest first. Append-only; supersede, never delete.
 
+## 2026-09-29 — Seed Chrome's OS-password check; idle daemons exit after 15 min
+
+**Why:** On Windows, Chrome checks whether the OS account has a blank password by
+calling `LogonUser(user, ".", "")`. That is an interactive logon (type 2), so
+every check logs a failed logon: Security event 4625, `C000006A`, process
+`chrome.exe`. Chrome stores the answer in the user-data-dir's `Local State`
+(`password_manager.os_password_blank` / `os_password_last_changed`). Every bx
+profile is its own user-data-dir, and agents create profiles freely: there were
+about 215. On 2026-09-29, 67 of these failed logons in one day repeatedly locked
+the Windows account (the lockout policy is 10 failures in 10 minutes), which
+also blocked RDP. The first one in the Security log is that same day, when
+Chrome and WebView2 updated to 154. The daemon now copies the already-computed
+answer into the profile's `Local State` before every launch
+(`daemon/osPassword.ts`). It takes the value from the user's real Chrome first,
+since that recomputes after a password change, and falls back to any other bx
+profile. Separately, daemons never exited, so dozens of Chromes piled up. The
+daemon now shuts itself down after `BX_IDLE_MINUTES` (default 15) with no
+`/cmd` activity and no recording in progress. `bx stop --all` is the manual
+sweep.
+**Rejected:** launching Playwright's bundled Chromium instead of Chrome. The
+check lives in `chrome/browser` and runs in Chromium too. Also rejected:
+relying on fewer profiles. That lowers the rate but gives no guarantee, and one
+burst of agents still locks the account.
+
 ## 2026-08-07 — Recording selects the captured tab by action activity, not byte size
 
 **Why:** Playwright's `recordVideo` writes one webm per page in the context;

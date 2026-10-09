@@ -29,7 +29,7 @@ import {
   type RunFile,
 } from "../protocol.ts";
 import { Session } from "./session.ts";
-import { harnessRoutes, recordStart, recordStop } from "./record.ts";
+import { harnessRoutes, recordStart, recordStop, recordingSlug } from "./record.ts";
 
 const ERROR_CODES: readonly string[] = [
   "target_not_found",
@@ -285,6 +285,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       return;
     }
     const cmd = parsed.data;
+    inFlight++;
     try {
       const data = await dispatch(cmd);
       log(`${cmd.cmd} ok`);
@@ -293,11 +294,39 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       const error = toBxError(err);
       log(`${cmd.cmd} failed: ${error.code} ${error.message}`);
       sendJson(res, fail(error));
+    } finally {
+      inFlight--;
+      lastActivity = Date.now();
     }
     return;
   }
 
   send(res, 404, "text/plain; charset=utf-8", "not found");
+}
+
+// Idle reaping. Agents start daemons and walk away (killed runs, forgotten
+// profiles), so without this they — and their Chrome — live forever and pile
+// up by the dozen. BX_IDLE_MINUTES overrides the default; 0 disables.
+const DEFAULT_IDLE_MINUTES = 15;
+const IDLE_CHECK_MS = 30_000;
+let inFlight = 0;
+let lastActivity = Date.now();
+
+function idleLimitMs(): number {
+  const raw = process.env["BX_IDLE_MINUTES"];
+  const minutes = raw === undefined || raw.trim() === "" ? DEFAULT_IDLE_MINUTES : Number(raw);
+  if (!Number.isFinite(minutes) || minutes < 0) return DEFAULT_IDLE_MINUTES * 60_000;
+  return minutes * 60_000;
+}
+
+const idleLimit = idleLimitMs();
+if (idleLimit > 0) {
+  setInterval(() => {
+    if (inFlight > 0 || recordingSlug() !== null) return;
+    if (Date.now() - lastActivity >= idleLimit) {
+      void shutdown(`idle for ${idleLimit / 60_000} min`);
+    }
+  }, IDLE_CHECK_MS).unref();
 }
 
 let shuttingDown = false;

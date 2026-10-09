@@ -1,6 +1,6 @@
 # bx — cliffnotes
 
-Last updated: 2026-08-12
+Last updated: 2026-09-29
 
 Purpose-built browser automation for Claude Code. A per-profile **daemon**
 (runs under **Node** — not Bun; see decisions.md) holds one real Chrome via
@@ -19,6 +19,7 @@ src/
     session.ts       browser lifecycle, target resolution, action log, ref registry
     distill.ts       els: DOM scan → numbered elements, budget-capped rendering
     observe.ts       console/net ring buffers, per-action error marks
+    osPassword.ts    pre-launch seed of Chrome's OS blank-password cache (stops failed Windows logons)
     record.ts        recording: video relaunch cycle + harness orchestration
     harness/harness.ts  browser-side: runs video-to-prompt distill() in-page
   flows/
@@ -37,7 +38,9 @@ scripts/build-harness.ts  Bun.build bundle of harness.ts (+ self-heals dep dist)
 tests/smoke.test.ts  live daemon suite (bun test), profile "bxtest"
 tests/flows.test.ts  synthesis + bx/flow-alias unit tests (no browser)
 tests/record.test.ts recording tab-selection unit tests (no browser)
-site/                bx.dested.com landing (Vite+React+Tailwind, self-contained)
+site/                bx.dested.com landing — plain "no-slop" HTML: App.tsx is one
+                     self-contained semantic doc + ~40-line index.css (no Tailwind,
+                     no demos). Vite+React shell only.
 Dockerfile, drydock.yaml, .github/  DRYDOCK-MANAGED (portal regenerates — don't hand-edit)
 ```
 
@@ -106,6 +109,12 @@ Dockerfile, drydock.yaml, .github/  DRYDOCK-MANAGED (portal regenerates — don'
   CLI/docs the former. Local disk only; recordings/ is gitignored.
 - expect returns pass:false as ok:true data — only the CLI turns it into exit 1.
 - One daemon per profile; ~/.bx/run/<profile>.json is the discovery file.
+- Daemons exit after `BX_IDLE_MINUTES` (default 15) with no /cmd and no active
+  recording. `bx stop --all` sweeps every daemon and clears stale run files.
+- ⚠ Every Chrome launch must be preceded by `seedOsPasswordCheck(profileDir)`.
+  On a cold profile, Chrome checks for a blank Windows password with a real
+  (failed) interactive logon, and a burst of those locks the Windows account.
+  Any new launch path must call it.
 - `bx tab close --all` reopens one blank tab after closing every page — closing
   the last page of a persistent context can take the browser (and the daemon's
   usable context) down with it, so the blank keeps the context alive. Don't drop

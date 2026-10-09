@@ -1,5 +1,44 @@
 # Updates
 
+## 2026-09-30 — No more terminal windows during bx record
+Every `bx record` opened a terminal: Playwright spawns its recordVideo ffmpeg without
+windowsHide, and with Windows Terminal as the default console the new console shows
+as a WT window. `daemon/hideWindows.ts` (imported first by daemon.ts) forces
+windowsHide on every child_process.spawn in the daemon. Console-window enumeration
+during a record: 1 new window unpatched, 0 patched. Commit 639d5f2.
+
+## 2026-09-29 — Stop Chrome's OS-password check from locking Windows; idle daemons exit
+bx-launched Chrome was failing a Windows logon on cold profiles, through Chrome's
+blank-password check (`LogonUser` with an empty password). Agent bursts of new
+profiles tripped the 10-failures-in-10-minutes lockout policy, which locked the
+account and blocked RDP. Added `daemon/osPassword.ts`: before each launch it
+seeds the profile's `Local State` with the cached answer, copied from the real
+Chrome or a sibling profile. It is wired into `ensureContext` and `relaunch`.
+Added an idle auto-shutdown to daemon.ts (`BX_IDLE_MINUTES`, default 15, 0
+disables, skipped while recording) and `bx stop --all`. `bx stop --all`
+stopped 1 live daemon and cleared 151 stale run files. SKILL.md now says to
+stop daemons when done and to reuse profile names. tsc clean. Live-tested:
+a fresh profile was seeded before launch, and the daemon idled out at
+`BX_IDLE_MINUTES=0.5`.
+
+## 2026-08-14 — Site: strip the landing page down to plain "no-slop" HTML
+Per the "launch with no css / just tell me the header, subheader, eyebrow" tweet,
+rewrote `site/` as one honest document. `App.tsx` is now self-contained semantic
+HTML (all real copy/numbers preserved from the old Hero/ClaudeCode/Race/Numbers/
+Delegation/HowItWorks/Honesty components); no Tailwind, no interactive demos.
+Deleted all `site/src/components/*`, `lib/os`, `lib/hooks`, `lib/constants`, and
+the old `index.css`. `index.css` is now a ~40-line stylesheet that *simulates* a
+plain IE6/HTML4 page (centered 44em column, generous spacing, bordered tables,
+blue links, green `bx`/PASS, red FAILED) — the ask was "no slop," not literally
+no CSS. Removed the `dark`/color-scheme meta from `index.html`. Then added back, in the same
+plain idiom: three hand-drawn CSS bar charts (a small `BarChart` in App.tsx, no
+lib) for the token/clock numbers, and the real `bx snap` fixture screenshots
+(login in the race section; settings light/dark before-after as the dark-mode
+delegation evidence) — clipped to their content with a fixed-height overflow-hidden
+`.shot` wrapper, files untouched. CSS bundle Tailwind → 1.65 kB. tsc clean, vite
+build clean, snapped in bx. (`data/skill-source.ts` still unused but regenerated
+by gen-skill; left in place.)
+
 ## 2026-08-12 — Doc: `bx click` is a trusted click, not synthetic (SPA/Next Link)
 A filming note claimed bx's "synthetic click doesn't fire Next's `<Link>` router."
 Disproven: `bx click` is Playwright `locator.click()` = a trusted CDP click

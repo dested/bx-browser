@@ -19,6 +19,7 @@ import {
   readRunFile,
   renderEl,
   renderPage,
+  stopAllDaemons,
   stopDaemon,
 } from "./client.ts";
 import { runFlow } from "./flows/runner.ts";
@@ -121,7 +122,9 @@ Setup
 
 Daemon
   profiles                         list profiles and which are running
-  stop                             shut this profile's daemon down
+  stop [--all]                     shut this profile's daemon down; --all stops
+                                   every daemon. Idle daemons also exit on their
+                                   own after 15 min (BX_IDLE_MINUTES, 0 = never)
   help                             this text
 
 Flags
@@ -873,6 +876,20 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
     }
 
     case "stop": {
+      if (takeFlag(args, "--all")) {
+        const result = await stopAllDaemons();
+        if (g.json) {
+          printJson(result);
+          return 0;
+        }
+        out(
+          result.stopped.length === 0
+            ? `no daemons running (cleared ${result.cleared.length} stale run files)`
+            : `stopped ${result.stopped.length}: ${result.stopped.join(", ")}` +
+                (result.cleared.length > 0 ? ` (cleared ${result.cleared.length} stale)` : ""),
+        );
+        return 0;
+      }
       const stopped = await stopDaemon(g.profile);
       if (g.json) {
         printJson({ profile: g.profile, stopped });

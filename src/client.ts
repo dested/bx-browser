@@ -174,6 +174,26 @@ export async function stopDaemon(profile: string): Promise<boolean> {
   return stopped;
 }
 
+/** Stops every daemon that has a run file; stale run files are cleared too. */
+export async function stopAllDaemons(): Promise<{ stopped: string[]; cleared: string[] }> {
+  const stopped: string[] = [];
+  const cleared: string[] = [];
+  let files: string[];
+  try {
+    files = fs.readdirSync(runDir());
+  } catch {
+    return { stopped, cleared };
+  }
+  const profiles = files.filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -".json".length));
+  await Promise.all(
+    profiles.map(async (profile) => {
+      if (await stopDaemon(profile)) stopped.push(profile);
+      else cleared.push(profile);
+    }),
+  );
+  return { stopped: stopped.sort(), cleared: cleared.sort() };
+}
+
 export function listProfiles(): { name: string; running: boolean }[] {
   const names = new Set<string>();
   const running = new Set<string>();
