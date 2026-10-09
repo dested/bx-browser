@@ -7,6 +7,8 @@
   using `token`/`port` from ~/.bx/run/<profile>.json — expect `"ok":true`,
   `gcExposed:true`, the last command in `recent` with your Claude session in
   `clients`. Or just run `destedtui --bx` and look.
+- **[cheap] Unit tests, no browser:** `bun test tests/actionLog.test.ts tests/record.test.ts tests/flows.test.ts`.
+  Always after touching daemon/actionLog.ts, record.ts or flows/.
 - **[medium] Smoke suite:** `bun test tests/smoke.test.ts` — 21 tests, ~11s,
   boots a headless daemon on profile "bxtest", drives the fixture app.
   Run after touching daemon/, cli, client, or flows.

@@ -2,6 +2,18 @@
 
 Newest first. Append-only; supersede, never delete.
 
+## 2026-10-08 — The action log keeps the newest 1000 entries, with absolute indexes
+
+**Why:** The log grew without limit, and some daemons run for hours. Every
+reader already works from an index (an agent's start index, a recording's
+start), so trimming moves a base offset instead of renumbering. An old index
+just reads whatever is left. A recording holds its start index, so its
+transcript is never trimmed mid-take. 1000 covers any agent run (their action
+budgets are far smaller) and any realistic `bx flow` session.
+**Rejected:** trimming by age (a slow manual session would lose its own
+history); renumbering on trim (breaks every outstanding `sinceIndex`); no cap
+plus a reset verb (nobody would call it).
+
 ## 2026-10-08 — The daemon serves /debug; the monitor lives in destedtui
 
 **Why:** Hunting memory growth across a dozen daemons needs what only the daemon

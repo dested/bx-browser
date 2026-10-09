@@ -287,10 +287,13 @@ export async function recordStart(session: Session, slug: string): Promise<Recor
   // driven tab by action activity in recordStop.
   await session.relaunch({ recordVideo: { dir: videoTmpDir, size: VIDEO_SIZE } });
 
+  const actionLogStartIndex = session.actions.nextIndex;
+  // The capped log must not trim this recording's transcript away mid-take.
+  session.actions.holdFrom(actionLogStartIndex);
   state = {
     slug,
     startedAtMs: Date.now(),
-    actionLogStartIndex: session.actionEntries.length,
+    actionLogStartIndex,
     videoTmpDir,
   };
   log(`recording "${slug}" → ${videoTmpDir}`);
@@ -301,8 +304,10 @@ export async function recordStop(session: Session, outDir: string): Promise<Reco
   const current = state;
   if (!current) throw { code: "not_recording", message: "not recording" };
 
-  // 1. The action log for this recording becomes the transcript.
-  const entries = session.actionEntries.slice(current.actionLogStartIndex);
+  // 1. The action log for this recording becomes the transcript. Once copied,
+  //    the log may trim again.
+  const entries = session.actions.since(current.actionLogStartIndex);
+  session.actions.holdFrom(null);
   const origin = session.logTimeOrigin;
   const segments = entries.map((entry) => ({
     t: Math.max(0, origin + entry.t - current.startedAtMs),

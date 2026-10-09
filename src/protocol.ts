@@ -556,8 +556,10 @@ export interface DebugResult {
   };
   clients: DebugClient[];
   internals: {
-    actionLog: number; // entries; the action log is never trimmed
+    actionLog: number; // entries kept; the newest actionLogCap survive (daemon/actionLog.ts)
     actionLogChars: number;
+    actionLogDropped: number; // trimmed over the daemon's life
+    actionLogCap: number;
     refPages: number;
     refEntries: number;
     consolePushed: number; // lifetime pushes into the console ring

@@ -32,6 +32,7 @@ import {
   type Target,
   type TextResult,
 } from "../protocol.ts";
+import { ACTION_LOG_CAP, ActionLog } from "./actionLog.ts";
 import { distillPage, renderEls, type DistillResult } from "./distill.ts";
 import { seedOsPasswordCheck } from "./osPassword.ts";
 import {
@@ -123,7 +124,8 @@ export class Session {
   private nextPageId = 1;
   private readonly pageIds = new WeakMap<Page, number>();
   private readonly refs = new Map<number, PageRefs>();
-  private readonly actions: ActionLogEntry[] = [];
+  /** Capped; record.ts holds it during a recording (see actionLog.ts). */
+  readonly actions = new ActionLog();
   private readonly buffers: Buffers;
   private readonly startedAt = Date.now();
   /** Opened on the first /debug read of a page, never by ordinary commands. */
@@ -290,7 +292,6 @@ export class Session {
       machine.target = { text: stableTarget };
     }
     this.actions.push({
-      index: this.actions.length,
       t: Date.now() - this.buffers.t0,
       cmd: cmd.cmd,
       text,
@@ -991,15 +992,15 @@ export class Session {
         };
       }),
     );
-    let actionLogChars = 0;
-    for (const a of this.actions) actionLogChars += a.text.length + a.cmdJson.length + (a.stableTarget?.length ?? 0);
     let refEntries = 0;
     for (const r of this.refs.values()) refEntries += r.entries.size;
     return {
       pages: out,
       internals: {
-        actionLog: this.actions.length,
-        actionLogChars,
+        actionLog: this.actions.size,
+        actionLogChars: this.actions.chars,
+        actionLogDropped: this.actions.dropped,
+        actionLogCap: ACTION_LOG_CAP,
         refPages: this.refs.size,
         refEntries,
         consolePushed: this.buffers.console.length,
@@ -1044,8 +1045,8 @@ export class Session {
 
   actionLog(cmd: CmdOf<"actionLog">): ActionLogResult {
     return {
-      entries: this.actions.slice(cmd.sinceIndex ?? 0),
-      nextIndex: this.actions.length,
+      entries: this.actions.since(cmd.sinceIndex ?? 0),
+      nextIndex: this.actions.nextIndex,
     };
   }
 
@@ -1056,11 +1057,6 @@ export class Session {
   /** The live context, or null when the browser is not running. */
   get liveContext(): BrowserContext | null {
     return this.context;
-  }
-
-  /** The live action log; recording slices it for the transcript. */
-  get actionEntries(): readonly ActionLogEntry[] {
-    return this.actions;
   }
 
   /** Wall-clock origin that `ActionLogEntry.t` is measured from. */

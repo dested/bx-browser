@@ -17,6 +17,7 @@ src/
   daemon/            ⚠ Node runtime: no Bun.*, no non-erasable TS syntax
     daemon.ts        node:http server, routes (/health /cmd /debug* /shutdown /fixture /harness*)
     session.ts       browser lifecycle, target resolution, action log, ref registry, debugInfo (per-page CDP metrics)
+    actionLog.ts     the action log, capped at the newest 1000 entries; absolute indexes, held during a recording
     debug.ts         /debug: Journal of every /cmd (in flight, last 200, totals, clients), process + loop counters, gc, heap snapshot
     hideWindows.ts   forces windowsHide on every child_process.spawn (imported first; stops ffmpeg console windows)
     distill.ts       els: DOM scan → numbered elements, budget-capped rendering
@@ -40,6 +41,7 @@ scripts/build-harness.ts  Bun.build bundle of harness.ts (+ self-heals dep dist)
 tests/smoke.test.ts  live daemon suite (bun test), profile "bxtest"
 tests/flows.test.ts  synthesis + bx/flow-alias unit tests (no browser)
 tests/record.test.ts recording tab-selection unit tests (no browser)
+tests/actionLog.test.ts  action-log cap: absolute indexes across trims, recording hold (no browser)
 site/                bx.dested.com landing — plain "no-slop" HTML: App.tsx is one
                      self-contained semantic doc + ~40-line index.css (no Tailwind,
                      no demos). Vite+React shell only.
@@ -134,9 +136,12 @@ Dockerfile, drydock.yaml, .github/  DRYDOCK-MANAGED (portal regenerates — don'
 - Daemons spawn with `--expose-gc` (client.ts) so /debug/gc can force a full
   collection; a daemon from before 2026-10-08 reports `gcExposed: false`, and
   an older one 404s /debug entirely ("old daemon" in the monitor).
-- Session.actions (the action log behind `bx flow`/synthesis) is never trimmed.
-  /debug reports its length and chars; it's the first suspect if a long-lived
-  daemon's node heap grows.
+- The action log (`session.actions`, daemon/actionLog.ts) keeps the newest
+  1000 entries. Readers hold ABSOLUTE indexes (`nextIndex`, `entry.index`):
+  read through `actions.since(i)`, never by array position, or a trimmed log
+  hands back the wrong entries. A recording calls `holdFrom(start)` so its
+  transcript can't be trimmed mid-take; anything else that needs a long
+  unbroken stretch must hold it the same way.
 
 ## Routes / URLs
 

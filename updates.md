@@ -1,5 +1,15 @@
 # Updates
 
+## 2026-10-08 — Cap the daemon's action log
+Asked to cap the action log, which grew for a daemon's whole life. Now
+`daemon/actionLog.ts` keeps the newest 1000 entries and trims in chunks of 200.
+Indexes stay absolute, so agent evidence, flow synthesis and `actionLog
+sinceIndex` callers see no renumbering. A recording holds its start so the
+transcript can't be trimmed mid-take. /debug adds `actionLogDropped` and
+`actionLogCap`. Tests: 37/37, plus a fixture recording e2e (3 actions in the
+transcript). Board #513.
+Touched: src/daemon/{actionLog,session,record}.ts, src/protocol.ts, tests/actionLog.test.ts
+
 ## 2026-10-08 — /debug surface for the destedtui bx monitor
 Asked for a live TUI of every bx daemon (memory, activity, who's driving) to chase
 leaks. Daemon side: `daemon/debug.ts` journals every /cmd (in flight, last 200,
