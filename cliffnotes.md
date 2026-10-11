@@ -125,8 +125,10 @@ Dockerfile, drydock.yaml, .github/  DRYDOCK-MANAGED (portal regenerates — don'
   usable context) down with it, so the blank keeps the context alive. Don't drop
   it. `--others` keeps the active tab; plain `tab close` is unchanged. Agent tabs
   are auto-closed by the driver's finally (tools.ts `pin.close()`), not by these.
-- `/debug` has an outside consumer: destedtui's bx screen (`destedtui --bx`,
-  `bxtop`, G:\code\destedtui src/lib/bx.ts) parses it with its own zod mirror.
+- `/debug` has outside consumers: destedtui's bx screen (`destedtui --bx`,
+  `bxtop`, G:\code\destedtui src/lib/bx.ts) parses it with its own zod mirror,
+  and sal-widgets' Fleet row (G:\code\sal-widgets\src\SalWidgets.Core\Health\BxWatch.cs)
+  reads `data.pages.length` every 15 s plus the run files' pid/port/token.
   Keep changes additive (new optional fields are fine; renames and removals
   break it) and bump `DEBUG_VERSION` for a breaking change. Reading /debug must
   never touch `lastActivity`, or a monitor keeps every daemon alive forever.
