@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Help center</title>
+    <link rel="stylesheet" href="/bench.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Help center</h1>
+      <p>Your support code is <strong id="code">…</strong></p>
+    </main>
+    <script>
+      fetch("/api/code")
+        .then((r) => r.json())
+        .then((d) => {
+          document.getElementById("code").textContent = d.code;
+        });
+    </script>
+  </body>
+</html>

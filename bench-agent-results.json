@@ -1,0 +1,75 @@
+{
+  "date": "2026-10-13T04:27:30.483Z",
+  "pricesChecked": "2026-10-12",
+  "models": {
+    "haiku": "claude-haiku-5-5",
+    "sonnet": "claude-sonnet-5-5",
+    "opus": "claude-opus-5-5"
+  },
+  "commit": "unknown",
+  "profile": "agentkit-bench",
+  "headless": true,
+  "tasks": [
+    "login",
+    "add-task"
+  ],
+  "repeat": 1,
+  "budgetUsd": 1,
+  "maxWallMs": 240000,
+  "partial": true,
+  "tiers": {
+    "haiku": {
+      "runs": 2,
+      "passed": 2,
+      "passRate": 1,
+      "falsePasses": 0,
+      "medianTurns": 5.5,
+      "p90Turns": 6,
+      "medianWallMs": 11336,
+      "totalUsd": 0.0041,
+      "sdkTotalUsd": 0.2054,
+      "usdPerRun": 0.0021,
+      "usdPerPass": 0.0021,
+      "endedBy": {
+        "report": 2
+      },
+      "escalations": 0
+    }
+  },
+  "runs": [
+    {
+      "task": "login",
+      "tier": "haiku",
+      "repeat": 1,
+      "pass": true,
+      "falsePass": false,
+      "detail": "signed in",
+      "status": "pass",
+      "endedBy": "report",
+      "finalTier": "haiku",
+      "escalated": false,
+      "turns": 6,
+      "wallMs": 14156,
+      "estUsd": 0.00281643,
+      "sdkUsd": 0.1408215,
+      "transcript": "C:\\Users\\dested\\.bx\\agent-runs\\2026-10-13T04-27-07-617Z.jsonl"
+    },
+    {
+      "task": "add-task",
+      "tier": "haiku",
+      "repeat": 1,
+      "pass": true,
+      "falsePass": false,
+      "detail": "tasks: [\"Walk the dog\",\"Buy oat milk\"]",
+      "status": "pass",
+      "endedBy": "report",
+      "finalTier": "haiku",
+      "escalated": false,
+      "turns": 5,
+      "wallMs": 8516,
+      "estUsd": 0.0012917600000000003,
+      "sdkUsd": 0.06458799999999999,
+      "transcript": "C:\\Users\\dested\\.bx\\agent-runs\\2026-10-13T04-27-21-900Z.jsonl"
+    }
+  ]
+}

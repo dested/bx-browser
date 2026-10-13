@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Support</title>
+    <link rel="stylesheet" href="/bench.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Support</h1>
+      <p>Every request needs a support code. The help center shows yours.</p>
+      <p><button class="secondary" id="help">Open help center</button></p>
+      <label for="code">Support code</label>
+      <input type="text" id="code" />
+      <p><button id="submit">Submit request</button></p>
+      <p id="status" role="status"></p>
+    </main>
+    <script>
+      // The code lives only in the popup, so the task cannot be done from
+      // this tab alone.
+      document.getElementById("help").addEventListener("click", () => {
+        window.open("/help.html", "help-center");
+      });
+      document.getElementById("submit").addEventListener("click", () => {
+        const code = document.getElementById("code").value.trim();
+        if (!code) return;
+        fetch("/api/event/popup", { method: "POST", body: JSON.stringify({ code }) }).catch(() => {});
+        document.getElementById("status").textContent = "Request submitted";
+      });
+    </script>
+  </body>
+</html>

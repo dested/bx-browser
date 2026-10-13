@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Feed</title>
+    <link rel="stylesheet" href="/bench.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Feed</h1>
+      <ul id="feed"></ul>
+      <p id="sentinel">Loading more…</p>
+    </main>
+    <script>
+      // An infinite feed: posts exist in the DOM only once the reader has
+      // scrolled near them, so no element scan can see post #57 up front.
+      const TOTAL = 200;
+      const BATCH = 20;
+      const TOPICS = ["Release notes", "Team update", "Design review", "Incident recap", "Hiring", "Roadmap"];
+      const feed = document.getElementById("feed");
+      let rendered = 0;
+
+      function more() {
+        const end = Math.min(TOTAL, rendered + BATCH);
+        for (let n = rendered + 1; n <= end; n++) {
+          const li = document.createElement("li");
+          li.style.minHeight = "56px";
+          const span = document.createElement("span");
+          span.textContent = `Post #${n}: ${TOPICS[n % TOPICS.length]}`;
+          const star = document.createElement("button");
+          star.className = "secondary";
+          star.textContent = "☆ Star";
+          star.setAttribute("aria-label", `Star post #${n}`);
+          star.setAttribute("aria-pressed", "false");
+          star.addEventListener("click", () => {
+            const on = star.getAttribute("aria-pressed") !== "true";
+            star.setAttribute("aria-pressed", String(on));
+            star.textContent = on ? "★ Starred" : "☆ Star";
+            fetch("/api/event/scroll", { method: "POST", body: JSON.stringify({ post: n, starred: on }) }).catch(() => {});
+          });
+          li.append(span, star);
+          feed.append(li);
+        }
+        rendered = end;
+        if (rendered >= TOTAL) document.getElementById("sentinel").textContent = "End of feed";
+      }
+
+      new IntersectionObserver((entries) => {
+        if (entries.some((e) => e.isIntersecting) && rendered < TOTAL) setTimeout(more, 300);
+      }).observe(document.getElementById("sentinel"));
+      more();
+    </script>
+  </body>
+</html>

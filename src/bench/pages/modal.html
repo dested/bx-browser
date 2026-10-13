@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Projects</title>
+    <link rel="stylesheet" href="/bench.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Projects</h1>
+      <ul id="projects"></ul>
+      <p id="status" role="status"></p>
+    </main>
+    <div id="backdrop" hidden>
+      <div role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+        <h2 id="confirm-title"></h2>
+        <p>This permanently deletes the project and its files.</p>
+        <div class="row">
+          <button class="secondary" id="cancel">Cancel</button>
+          <button id="confirm">Delete</button>
+        </div>
+      </div>
+    </div>
+    <script>
+      // Every row's button and the dialog's confirm button all read "Delete":
+      // the dialog has to win while it is open.
+      let projects = ["Alpha", "Beta", "Gamma", "Delta"];
+      let pending = null;
+      const list = document.getElementById("projects");
+      const backdrop = document.getElementById("backdrop");
+
+      function paint() {
+        list.innerHTML = "";
+        for (const name of projects) {
+          const li = document.createElement("li");
+          const span = document.createElement("span");
+          span.textContent = name;
+          const del = document.createElement("button");
+          del.className = "secondary";
+          del.textContent = "Delete";
+          del.addEventListener("click", () => {
+            pending = name;
+            document.getElementById("confirm-title").textContent = `Delete ${name}?`;
+            backdrop.hidden = false;
+          });
+          li.append(span, del);
+          list.append(li);
+        }
+      }
+
+      document.getElementById("cancel").addEventListener("click", () => {
+        pending = null;
+        backdrop.hidden = true;
+      });
+      document.getElementById("confirm").addEventListener("click", () => {
+        if (pending === null) return;
+        projects = projects.filter((p) => p !== pending);
+        report("modal", { deleted: pending });
+        document.getElementById("status").textContent = `Deleted ${pending}`;
+        pending = null;
+        backdrop.hidden = true;
+        paint();
+      });
+
+      function report(page, data) {
+        fetch(`/api/event/${page}`, { method: "POST", body: JSON.stringify(data) }).catch(() => {});
+      }
+      paint();
+    </script>
+  </body>
+</html>

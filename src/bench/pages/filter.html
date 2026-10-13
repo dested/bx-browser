@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Catalog</title>
+    <link rel="stylesheet" href="/bench.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Catalog</h1>
+      <div class="row">
+        <input type="search" id="search" placeholder="Search products" aria-label="Search products" />
+        <span>Cart: <strong id="cart-count">0</strong> items</span>
+      </div>
+      <div class="row" id="chips" style="margin-top: 12px"></div>
+      <ul id="products"></ul>
+      <button class="secondary" id="more">Show more</button>
+    </main>
+    <script>
+      // Unfiltered, the first page holds no Garden products at all: finding
+      // the cheapest one means filtering (or paging) and reading prices.
+      const PRODUCTS = [
+        ["Chef knife", "Kitchen", 39.0], ["Desk lamp", "Office", 24.5], ["Cutting board", "Kitchen", 18.0],
+        ["Stapler", "Office", 8.4], ["Saucepan", "Kitchen", 29.99], ["Notebook", "Office", 4.25],
+        ["Whisk", "Kitchen", 6.5], ["Monitor stand", "Office", 32.0], ["Colander", "Kitchen", 12.0],
+        ["Pen set", "Office", 9.75], ["Hose reel", "Garden", 34.0], ["Mixing bowls", "Kitchen", 21.0],
+        ["Trowel", "Garden", 12.5], ["Desk organizer", "Office", 15.0], ["Plant labels", "Garden", 6.8],
+        ["Kettle", "Kitchen", 27.0], ["Pruning shears", "Garden", 18.0], ["Paper clips", "Office", 2.1],
+        ["Watering can", "Garden", 14.25], ["Spatula", "Kitchen", 5.6], ["Garden gloves", "Garden", 7.2],
+        ["Label maker", "Office", 36.0], ["Rake", "Garden", 22.0], ["Teapot", "Kitchen", 19.5],
+        ["Planter", "Garden", 9.99], ["Whiteboard", "Office", 45.0], ["Seed tray", "Garden", 6.75],
+        ["Oven mitts", "Kitchen", 8.9], ["Kneeling pad", "Garden", 11.4], ["File folders", "Office", 7.3],
+        ["Bird feeder", "Garden", 16.0], ["Measuring cups", "Kitchen", 10.0], ["Compost bin", "Garden", 48.0],
+        ["Sticky notes", "Office", 3.2], ["Grater", "Kitchen", 9.0], ["Bookends", "Office", 13.0],
+      ];
+      const PAGE = 10;
+      let category = "All";
+      let shown = PAGE;
+      const cart = [];
+
+      const chips = document.getElementById("chips");
+      for (const name of ["All", "Kitchen", "Garden", "Office"]) {
+        const b = document.createElement("button");
+        b.className = "secondary";
+        b.textContent = name;
+        b.setAttribute("aria-pressed", String(name === category));
+        b.addEventListener("click", () => {
+          category = name;
+          shown = PAGE;
+          for (const c of chips.children) c.setAttribute("aria-pressed", String(c === b));
+          paint();
+        });
+        chips.append(b);
+      }
+      document.getElementById("search").addEventListener("input", () => {
+        shown = PAGE;
+        paint();
+      });
+      document.getElementById("more").addEventListener("click", () => {
+        shown += PAGE;
+        paint();
+      });
+
+      function paint() {
+        const q = document.getElementById("search").value.trim().toLowerCase();
+        const matches = PRODUCTS.filter(
+          ([name, cat]) => (category === "All" || cat === category) && name.toLowerCase().includes(q),
+        );
+        const list = document.getElementById("products");
+        list.innerHTML = "";
+        for (const [name, cat, price] of matches.slice(0, shown)) {
+          const li = document.createElement("li");
+          const span = document.createElement("span");
+          span.textContent = `${name} · ${cat} · $${price.toFixed(2)}`;
+          const add = document.createElement("button");
+          add.textContent = "Add to cart";
+          add.setAttribute("aria-label", `Add ${name} to cart`);
+          add.addEventListener("click", () => {
+            cart.push(name);
+            document.getElementById("cart-count").textContent = String(cart.length);
+            fetch("/api/event/filter", { method: "POST", body: JSON.stringify({ added: name }) }).catch(() => {});
+          });
+          li.append(span, add);
+          list.append(li);
+        }
+        document.getElementById("more").hidden = matches.length <= shown;
+      }
+      paint();
+    </script>
+  </body>
+</html>

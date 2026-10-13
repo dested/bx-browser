@@ -1,0 +1,87 @@
+body {
+  margin: 0;
+  font: 15px/1.5 system-ui, -apple-system, Segoe UI, sans-serif;
+  color: #1a1a1a;
+}
+main {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 32px 20px 64px;
+}
+ul {
+  list-style: none;
+  padding: 0;
+}
+li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid #e5e7eb;
+}
+li span {
+  flex: 1;
+}
+button {
+  padding: 6px 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #2563eb;
+  color: #fff;
+  cursor: pointer;
+}
+button.secondary {
+  background: transparent;
+  color: #1a1a1a;
+}
+button[aria-pressed="true"] {
+  background: #1e3a8a;
+  color: #fff;
+}
+label {
+  display: block;
+  margin: 12px 0 4px;
+}
+input[type="text"],
+input[type="search"],
+select {
+  padding: 6px 8px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+}
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+#backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: grid;
+  place-items: center;
+}
+#backdrop[hidden] {
+  display: none;
+}
+[role="dialog"] {
+  background: #fff;
+  padding: 20px;
+  border-radius: 8px;
+  min-width: 300px;
+}
+[role="listbox"] {
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  margin: 4px 0;
+  padding: 4px 0;
+}
+[role="option"] {
+  padding: 4px 10px;
+  border: 0;
+  cursor: pointer;
+}
+[role="option"]:hover {
+  background: #eef2ff;
+}

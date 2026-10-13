@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Checkout</title>
+    <link rel="stylesheet" href="/bench.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Checkout</h1>
+      <label for="country">Country</label>
+      <select id="country">
+        <option value="">Choose a country</option>
+        <option value="US">United States</option>
+        <option value="CA">Canada</option>
+        <option value="MX">Mexico</option>
+        <option value="GB">United Kingdom</option>
+      </select>
+
+      <label id="size-label">Size</label>
+      <!-- A custom dropdown: no <select>, just a button that opens a listbox. -->
+      <button
+        class="secondary"
+        id="size"
+        aria-haspopup="listbox"
+        aria-expanded="false"
+        aria-labelledby="size-label size"
+      >
+        Choose size
+      </button>
+      <ul role="listbox" id="size-list" aria-labelledby="size-label" hidden>
+        <li role="option" aria-selected="false">Small</li>
+        <li role="option" aria-selected="false">Medium</li>
+        <li role="option" aria-selected="false">Large</li>
+        <li role="option" aria-selected="false">X-Large</li>
+      </ul>
+
+      <div class="row" style="margin-top: 12px">
+        <input type="checkbox" id="express" />
+        <label for="express" style="margin: 0">Express shipping</label>
+      </div>
+
+      <p><button id="place">Place order</button></p>
+      <p id="status" role="status"></p>
+    </main>
+    <script>
+      const sizeButton = document.getElementById("size");
+      const sizeList = document.getElementById("size-list");
+      let size = null;
+
+      sizeButton.addEventListener("click", () => {
+        const open = sizeList.hidden;
+        sizeList.hidden = !open;
+        sizeButton.setAttribute("aria-expanded", String(open));
+      });
+      for (const option of sizeList.querySelectorAll('[role="option"]')) {
+        option.addEventListener("click", () => {
+          size = option.textContent.trim();
+          for (const o of sizeList.querySelectorAll('[role="option"]')) {
+            o.setAttribute("aria-selected", String(o === option));
+          }
+          sizeButton.textContent = size;
+          sizeList.hidden = true;
+          sizeButton.setAttribute("aria-expanded", "false");
+        });
+      }
+
+      document.getElementById("place").addEventListener("click", () => {
+        const order = {
+          country: document.getElementById("country").value,
+          size,
+          express: document.getElementById("express").checked,
+        };
+        const status = document.getElementById("status");
+        if (!order.country || !order.size) {
+          status.textContent = "Choose a country and a size first";
+          return;
+        }
+        fetch("/api/event/select", { method: "POST", body: JSON.stringify(order) }).catch(() => {});
+        status.textContent = "Order placed";
+      });
+    </script>
+  </body>
+</html>

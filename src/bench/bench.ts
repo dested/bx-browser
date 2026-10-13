@@ -1,6 +1,7 @@
 // bx benchmark harness.
 //
 //   bun src/bench/bench.ts [--profile bxbench] [--headed] [--agent]
+//   bun src/bench/bench.ts --agent-suite …   (the agent bench: see agentSuite.ts)
 //
 // Measures the numbers that justify bx over a screenshot-loop extension: cold
 // start, per-verb latency, the token cost of an observation, and deterministic
@@ -367,7 +368,11 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err: unknown) => {
+const entry = argv.includes("--agent-suite")
+  ? import("./agentSuite.ts").then((m) => m.runAgentSuite(argv))
+  : main();
+
+entry.catch((err: unknown) => {
   console.error(`bench failed: ${err instanceof Error ? err.message : String(err)}`);
   process.exitCode = 1;
 });
