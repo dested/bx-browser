@@ -45,7 +45,7 @@ import {
   type Buffers,
 } from "./observe.ts";
 import { recordingSlug } from "./record.ts";
-import type { BrowserContext, CDPSession, Locator, Page } from "playwright-core";
+import type { BrowserContext, CDPSession, Locator, Page, Request } from "playwright-core";
 
 type CmdOf<K extends Cmd["cmd"]> = Extract<Cmd, { cmd: K }>;
 
@@ -83,7 +83,84 @@ interface Performed {
   secret?: boolean;
 }
 
-const SETTLE_MS = 150;
+// Adaptive settle (S1): quiet window and default cap.
+const QUIET_MS = 50;
+const SETTLE_CAP_MS = 1500;
+const MODIFIER_KEYS = new Set(["Shift", "Control", "Alt", "Meta"]);
+// The page's document was replaced (navigation) under an evaluate.
+const CONTEXT_GONE = /Execution context was destroyed|Cannot find context|navigat/i;
+
+/** In-page: resolves once no DOM mutation has happened for `quietMs`. */
+function domQuiet(o: { quietMs: number; capMs: number }): Promise<{ quiet: boolean; title: string }> {
+  return new Promise((resolve) => {
+    const root = document.documentElement ?? document;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (quiet: boolean): void => {
+      observer.disconnect();
+      clearTimeout(timer);
+      clearTimeout(cap);
+      resolve({ quiet, title: document.title });
+    };
+    const observer = new MutationObserver(() => {
+      clearTimeout(timer);
+      timer = setTimeout(finish, o.quietMs, true);
+    });
+    observer.observe(root, { subtree: true, childList: true, attributes: true, characterData: true });
+    timer = setTimeout(finish, o.quietMs, true);
+    const cap = setTimeout(finish, o.capMs, false);
+  });
+}
+
+/** fetch/XHR requests a page starts while an action runs. */
+interface RequestWatch {
+  inFlight(): number;
+  /** Date.now() of the last start or finish; 0 when nothing happened. */
+  lastChange(): number;
+  /** Resolves when nothing is in flight, or after `ms`. */
+  drained(ms: number): Promise<void>;
+  stop(): void;
+}
+
+function watchRequests(page: Page): RequestWatch {
+  const open = new Set<Request>();
+  let lastChange = 0;
+  let wake: (() => void) | null = null;
+  const onRequest = (r: Request): void => {
+    const type = r.resourceType();
+    if (type !== "fetch" && type !== "xhr") return;
+    open.add(r);
+    lastChange = Date.now();
+  };
+  const onDone = (r: Request): void => {
+    if (!open.delete(r)) return;
+    lastChange = Date.now();
+    if (open.size === 0 && wake) wake();
+  };
+  page.on("request", onRequest);
+  page.on("requestfinished", onDone);
+  page.on("requestfailed", onDone);
+  return {
+    inFlight: () => open.size,
+    lastChange: () => lastChange,
+    drained: (ms) =>
+      open.size === 0
+        ? Promise.resolve()
+        : new Promise((resolve) => {
+            const timer = setTimeout(done, ms);
+            function done(): void {
+              clearTimeout(timer);
+              wake = null;
+              resolve();
+            }
+            wake = done;
+          }),
+    stop: () => {
+      page.off("request", onRequest);
+      page.off("requestfinished", onDone);
+      page.off("requestfailed", onDone);
+    },
+  };
+}
 // synthesize.ts matches this mark to emit a placeholder for redacted fills.
 const REDACTED_MARK = "•••";
 const HAS_SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i;
@@ -441,23 +518,35 @@ export class Session {
   /**
    * Common envelope for state-changing commands: console mark + url before,
    * settle + diff after. `cmd` null means "do not write to the action log".
+   * `settleCap` is the most settle() may wait; 0 skips it.
    */
   private async runAction(
     cmd: Cmd | null,
     tab: number | undefined,
     perform: (page: Page) => Promise<Performed>,
+    settleCap = SETTLE_CAP_MS,
   ): Promise<ActionResult> {
     const page = await this.pageFor(tab);
     const urlBefore = page.url();
     const mark = markConsole(this.buffers.console);
-    const { text, stableTarget, secret } = await perform(page);
-    await sleep(SETTLE_MS);
+    // Counted from before the action: only requests it caused hold the settle.
+    const requests = watchRequests(page);
+    let settledMs = 0;
+    let performed: Performed;
+    try {
+      performed = await perform(page);
+      if (settleCap > 0) settledMs = await this.settle(page, settleCap, requests);
+    } finally {
+      requests.stop();
+    }
+    const { text, stableTarget, secret } = performed;
     const navigated = urlBefore !== page.url();
     if (navigated) this.refsFor(page).generation++;
     const result: ActionResult = {
       page: this.pageInfo(page),
       navigated,
       consoleErrors: newErrorsSince(this.buffers.console, mark).slice(0, 5),
+      settledMs,
     };
     // The log outlives the command: a password must not reach cmdJson.
     if (cmd) {
@@ -465,6 +554,43 @@ export class Session {
       this.appendAction(logged, text, stableTarget, this.pageId(page));
     }
     return result;
+  }
+
+  /**
+   * Waits until the DOM has been quiet for QUIET_MS and none of the action's
+   * fetch/XHR requests is in flight, capped at `capMs`. Returns the time
+   * spent. A navigation mid-wait restarts the DOM check on the new document.
+   */
+  private async settle(page: Page, capMs: number, requests: RequestWatch): Promise<number> {
+    const started = Date.now();
+    const left = (): number => capMs - (Date.now() - started);
+    while (left() > 0) {
+      let quiet: boolean;
+      try {
+        const r = await page.evaluate(domQuiet, { quietMs: QUIET_MS, capMs: left() });
+        this.titles.set(this.pageId(page), r.title);
+        quiet = r.quiet;
+      } catch (err) {
+        if (page.isClosed() || !CONTEXT_GONE.test(errorMessage(err))) break;
+        await page.waitForLoadState("domcontentloaded", { timeout: Math.max(1, left()) }).catch(() => undefined);
+        continue;
+      }
+      if (!quiet) break;
+      if (requests.inFlight() > 0) {
+        await requests.drained(left());
+        continue;
+      }
+      // A request that just finished may still be rendering its result.
+      if (Date.now() - requests.lastChange() < QUIET_MS) continue;
+      break;
+    }
+    return Math.min(capMs, Date.now() - started);
+  }
+
+  /** Explicit `settle` wins; otherwise `skip` actions don't settle at all. */
+  private settleCap(requested: number | undefined, skip = false): number {
+    if (requested !== undefined) return requested;
+    return skip ? 0 : SETTLE_CAP_MS;
   }
 
   // -------------------------------------------------------------------------
@@ -599,7 +725,7 @@ export class Session {
       const { locator, stable } = await this.resolveTarget(page, cmd.target);
       await locator.click({ timeout: cmd.timeoutMs ?? BUDGET.DEFAULT_TIMEOUT_MS });
       return { text: `clicked "${stable}"`, stableTarget: stable };
-    });
+    }, this.settleCap(cmd.settle));
   }
 
   async fill(cmd: CmdOf<"fill">): Promise<ActionResult> {
@@ -610,7 +736,7 @@ export class Session {
       const secret = type === "password";
       const shown = secret ? REDACTED_MARK : cmd.value;
       return { text: `filled "${stable}" with "${shown}"`, stableTarget: stable, secret };
-    });
+    }, this.settleCap(cmd.settle));
   }
 
   async select(cmd: CmdOf<"select">): Promise<ActionResult> {
@@ -623,14 +749,14 @@ export class Session {
         await locator.selectOption({ label: cmd.value }, { timeout });
       }
       return { text: `selected "${cmd.value}" in "${stable}"`, stableTarget: stable };
-    });
+    }, this.settleCap(cmd.settle));
   }
 
   async press(cmd: CmdOf<"press">): Promise<ActionResult> {
     return this.runAction(cmd, cmd.tab, async (page) => {
       await page.keyboard.press(cmd.key);
       return { text: `pressed ${cmd.key}` };
-    });
+    }, this.settleCap(cmd.settle, MODIFIER_KEYS.has(cmd.key)));
   }
 
   async wait(cmd: CmdOf<"wait">): Promise<ActionResult> {
@@ -639,6 +765,7 @@ export class Session {
       throw { code: "bad_request", message: "wait takes exactly one of --text, --selector, --ms" };
     }
     const timeout = cmd.timeoutMs ?? BUDGET.DEFAULT_TIMEOUT_MS;
+    // The wait is its own settle: the caller named what to wait for.
     return this.runAction(null, cmd.tab, async (page) => {
       if (cmd.ms !== undefined) {
         await sleep(Math.min(cmd.ms, 30000));
@@ -648,7 +775,7 @@ export class Session {
         await page.locator(cmd.selector).first().waitFor({ state: "visible", timeout });
       }
       return { text: "waited" };
-    });
+    }, 0);
   }
 
   async expect(cmd: CmdOf<"expect">): Promise<ExpectResult> {
@@ -842,7 +969,7 @@ export class Session {
       await page.goBack({ waitUntil: "domcontentloaded" });
       this.refsFor(page).generation++;
       return { text: "went back" };
-    });
+    }, this.settleCap(cmd.settle));
   }
 
   async reload(cmd: CmdOf<"reload">): Promise<ActionResult> {
@@ -850,7 +977,7 @@ export class Session {
       await page.reload({ waitUntil: "domcontentloaded" });
       this.refsFor(page).generation++;
       return { text: "reloaded" };
-    });
+    }, this.settleCap(cmd.settle));
   }
 
   async mouse(cmd: CmdOf<"mouse">): Promise<ActionResult> {
@@ -871,7 +998,7 @@ export class Session {
         text: `mouse ${cmd.action} at ${cmd.x},${cmd.y}${where}`,
         stableTarget: origin.stable,
       };
-    });
+    }, this.settleCap(cmd.settle, cmd.action === "move"));
   }
 
   async drag(cmd: CmdOf<"drag">): Promise<ActionResult> {
@@ -888,7 +1015,7 @@ export class Session {
         text: `dragged ${cmd.fromX},${cmd.fromY} → ${cmd.toX},${cmd.toY}${where}${how}`,
         stableTarget: origin.stable,
       };
-    });
+    }, this.settleCap(cmd.settle));
   }
 
   /**
@@ -986,7 +1113,7 @@ export class Session {
       if (cmd.action === "down") await page.keyboard.down(cmd.key);
       else await page.keyboard.up(cmd.key);
       return { text: `key ${cmd.action} "${cmd.key}"` };
-    });
+    }, this.settleCap(cmd.settle, true));
   }
 
   async wheel(cmd: CmdOf<"wheel">): Promise<ActionResult> {
@@ -999,7 +1126,7 @@ export class Session {
       }
       await page.mouse.wheel(0, cmd.deltaY);
       return { text: `wheel ${cmd.deltaY}`, stableTarget: stable };
-    });
+    }, this.settleCap(cmd.settle));
   }
 
   async tabs(): Promise<TabsResult> {
