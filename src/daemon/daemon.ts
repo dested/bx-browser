@@ -36,6 +36,7 @@ import { Session, steps } from "./session.ts";
 import { harnessRoutes, recordStart, recordStop, recordingSlug } from "./record.ts";
 import { collectDebug, heapSnapshot, Journal, parseClientTag, runGc } from "./debug.ts";
 import { pruneSnaps, snapDays } from "./orphans.ts";
+import { serveArgv } from "../argv/serve.ts";
 
 // K2: cache V8 bytecode for modules loaded from here on (chiefly the lazy
 // playwright-core import, ~45 ms saved per cold start). Node 22.1+ only.
@@ -257,6 +258,46 @@ async function dispatch(cmd: Cmd): Promise<unknown> {
   }
 }
 
+/**
+ * One /cmd body, start to finish: schema check, journal, deadline, log line.
+ * POST /cmd sends the envelope as-is; POST /argv renders it as CLI output.
+ */
+async function runCmd(
+  body: unknown,
+  clientHeader: string | string[] | undefined,
+  deadlineHeader: string | string[] | undefined,
+): Promise<CmdResult> {
+  const parsed = CmdSchema.safeParse(body);
+  if (!parsed.success) return fail({ code: "bad_request", message: parsed.error.message });
+  const cmd = parsed.data;
+  const id = journal.begin(cmd, parseClientTag(clientHeader));
+  let failure: BxError | null = null;
+  const relaunchesBefore = session.relaunches;
+  const startedAt = Date.now();
+  const pinned = "tab" in cmd ? cmd.tab : undefined;
+  try {
+    const tracker = { label: cmd.cmd };
+    const work = steps.run(tracker, () => dispatch(cmd));
+    const limit = deadlineFor(cmd, deadlineHeader);
+    const data = limit === null ? await work : await withDeadline(work, limit, tracker);
+    const tab = pinned ?? resultTab(data) ?? session.activeTabId;
+    const settled = resultSettle(data);
+    log(`${cmd.cmd} ok ${Date.now() - startedAt}ms${tab === undefined ? "" : ` tab=${tab}`}${settled === undefined ? "" : ` settle=${settled}ms`}`);
+    const envelope: CmdResult = { ok: true, data };
+    if (session.relaunches > relaunchesBefore) envelope.relaunched = true;
+    return envelope;
+  } catch (err) {
+    await session.noteFailure(err);
+    failure = toBxError(err);
+    const tab = pinned ?? session.activeTabId;
+    log(`${cmd.cmd} failed: ${failure.code} ${failure.message} (${Date.now() - startedAt}ms${tab === undefined ? "" : ` tab=${tab}`})`);
+    return fail(failure);
+  } finally {
+    journal.end(id, failure);
+    lastActivity = Date.now();
+  }
+}
+
 async function serveFixture(pathname: string, res: ServerResponse): Promise<void> {
   const rest =
     pathname === "/fixture" || pathname === "/fixture/" ? "" : pathname.slice("/fixture/".length);
@@ -350,38 +391,25 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       sendJson(res, fail({ code: "bad_request", message: "body is not valid JSON" }));
       return;
     }
-    const parsed = CmdSchema.safeParse(body);
-    if (!parsed.success) {
-      sendJson(res, fail({ code: "bad_request", message: parsed.error.message }));
+    sendJson(res, await runCmd(body, req.headers[CLIENT_HEADER], req.headers[DEADLINE_HEADER]));
+    return;
+  }
+
+  // bx.exe's front door: a whole command line in, {stdout, stderr, exit} out,
+  // or {fallback: true} for verbs only the Bun CLI runs (src/argv/serve.ts).
+  if (pathname === "/argv" && method === "POST") {
+    if (!authorized) {
+      sendJson(res, fail({ code: "bad_request", message: "bad token" }), 401);
       return;
     }
-    const cmd = parsed.data;
-    const id = journal.begin(cmd, parseClientTag(req.headers[CLIENT_HEADER]));
-    let failure: BxError | null = null;
-    const relaunchesBefore = session.relaunches;
-    const startedAt = Date.now();
-    const pinned = "tab" in cmd ? cmd.tab : undefined;
+    let body: unknown;
     try {
-      const tracker = { label: cmd.cmd };
-      const work = steps.run(tracker, () => dispatch(cmd));
-      const limit = deadlineFor(cmd, req.headers[DEADLINE_HEADER]);
-      const data = limit === null ? await work : await withDeadline(work, limit, tracker);
-      const tab = pinned ?? resultTab(data) ?? session.activeTabId;
-      const settled = resultSettle(data);
-      log(`${cmd.cmd} ok ${Date.now() - startedAt}ms${tab === undefined ? "" : ` tab=${tab}`}${settled === undefined ? "" : ` settle=${settled}ms`}`);
-      const envelope: CmdResult = { ok: true, data };
-      if (session.relaunches > relaunchesBefore) envelope.relaunched = true;
-      sendJson(res, envelope);
-    } catch (err) {
-      await session.noteFailure(err);
-      failure = toBxError(err);
-      const tab = pinned ?? session.activeTabId;
-      log(`${cmd.cmd} failed: ${failure.code} ${failure.message} (${Date.now() - startedAt}ms${tab === undefined ? "" : ` tab=${tab}`})`);
-      sendJson(res, fail(failure));
-    } finally {
-      journal.end(id, failure);
-      lastActivity = Date.now();
+      body = JSON.parse(await readBody(req));
+    } catch {
+      sendJson(res, fail({ code: "bad_request", message: "body is not valid JSON" }), 400);
+      return;
     }
+    sendJson(res, await serveArgv(body, { profile, headless, runCmd }));
     return;
   }
 
