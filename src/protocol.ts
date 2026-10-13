@@ -125,7 +125,7 @@ const tabPin = { tab: z.number().int().nonnegative().optional() };
 
 // Adaptive settle for actions: after the action the daemon waits until the DOM
 // and the action's network requests are quiet for 50 ms, capped at `settle` ms
-// (default 1500; 0 skips settling). ActionResult.settledMs reports the wait.
+// (default 1000; 0 skips settling). ActionResult.settledMs reports the wait.
 //
 // then: append an observation to the same result (ActionResult.then).
 // until: after settling, wait for this text to be visible (timeoutMs applies);
