@@ -105,6 +105,75 @@ A file nobody owns: ask the lead before touching it.
 
 **Don't.** Touch protocol.ts (send lines), cli.ts or client.ts; change command names or existing result fields; add dependencies; push.
 
+## Phase 2 contract (lead lands it in protocol.ts after the sample)
+
+All optional fields; the full text is in `G:\code\bx\src\protocol.ts` once landed. Summary:
+- Targets gain `{testid}`, `{role, name?}`, `{label}` and `exact?`/`first?` on text/testid/role/label. CLI prefixes `text:`, `testid:`, `label:`, `role:<role>[:<name>]`, flags `--exact`, `--first`.
+- New error code `ambiguous` (nearMatches = the tied candidates, registered as refs).
+- `El.frame?`, `El.dialog?`. `els` gains `diff?`, `clickables?`; `ElsResult.diff?: {added, removed: number[], changed}`.
+- Actions gain `then?: "els"|"text"|"snap"` and `until?: string`. `ActionResult.delta?: ActionDelta` (url, title, dialog opened/closed, alerts ≤3, added, removed, focused, newTab) and `ActionResult.then?`.
+- `wait` gains `idle`, `gone` (Target), `url`, `js`.
+- `text` gains `target`, `md`, `timeoutMs` (selector kept, target wins).
+- `snap` gains `target`, `jpeg`, `quality`, `stable`; `SnapResult.format?`.
+- `console`/`net` gain `allTabs` and the tab pin; `net` gains `all`; entries gain `tab?`, NetEntry `id?`, `resourceType?`. New cmd `netBody {id}` → `NetBodyResult`.
+
+## resolver: opus-high (phase 2)
+
+**Goal.** Targets resolve to the element the caller meant: exact beats fuzzy, hidden never wins, ties are reported, and refs track the element itself across scans. `els` sees shadow DOM, iframes and modals, and stays fast on huge pages.
+
+**Read first.** The audit ITEMS C1 C2 C3 C7 C8 S5; `G:\code\bx\src\daemon\session.ts` resolveTarget (~341), nearMatches, register/refsFor; `G:\code\bx\src\daemon\distill.ts`; the Targets comment in `G:\code\bx\src\protocol.ts`.
+
+**Decisions already made.**
+- New `src/daemon/resolve.ts` (Node runtime rules) exports: `pageRefs(page)` state; `scanEls(page, {all, filter, diff, clickables}) → ElsResult`; `resolveTarget(page, target, {timeoutMs}) → {locator, stable}`; `class ResolveError extends Error { code: "target_not_found" | "stale_ref" | "ambiguous"; nearMatches?: El[] }`. distill.ts keeps the in-page scan, rewritten.
+- Identity refs: an in-page registry (`window.__bx`, installed lazily by evaluate, re-installed per document and per frame) keeps WeakRef id→element and WeakMap element→id. Ids come from a per-page daemon counter passed in, so a ref number is never reused within a tab across navigations. A ref is stale only when its element is gone or disconnected: `stale_ref` "ref 12 is gone (the element left the page) — re-run els". Refs from an earlier document are stale the same way. No generation bump on scan.
+- `{ref, orText}`: the ref when live, else orText as a text target.
+- Resolution: one in-page pass scores candidates per the protocol Targets comment. The winner gets attribute `data-bx-ref="<id>"` and the locator is `frame.locator('[data-bx-ref="<id>"]')`. If nothing matches, poll every 100 ms up to min(timeoutMs ?? 5000, 2000) ms, then `target_not_found` with ≤5 nearMatches. A tie at the top score → `ambiguous` unless `first`. `stable` = testid, else accessible name, else selector (flows depend on it).
+- Visibility: `checkVisibility({checkOpacity: true, checkVisibilityCSS: true})` with the zero-rect test; never `getComputedStyle` on ancestors. Elements under `inert` or an `aria-hidden="true"` ancestor are excluded from els and from text resolution.
+- els: open shadow roots walked; same-origin iframes included (El.frame); an open `dialog[open]` / `[aria-modal="true"]` lists first with `dialog: true` and drops the background; `--clickables` adds `cursor:pointer` elements with no role. Names from aria-label/labelledby/label, else `textContent` (not innerText) squashed to 80. Output ordered: dialog, then viewport top-to-bottom, then the rest; stop scanning once the budget is full and the viewport set is complete. `diff` keeps the previous scan per tab (ref → role+name+state signature).
+- `cssPath` is no longer computed (identity refs replace it). Remove `RefEntry.cssPath` usage; send the lead the protocol lines for RefEntry if its shape changes.
+
+**Owns.** `src/daemon/resolve.ts`, `src/daemon/distill.ts`, `tests/resolve.test.ts` (headless Playwright page driven directly via playwright-core, no daemon; covers Save vs Save draft, hidden test-id twin, `2` as text, shadow button, iframe button, modal scoping, ambiguous tie, stale after removal, 6,000-element scan time).
+
+**Hand-off to core.** You don't edit session.ts. When resolve.ts is ready, send the lead the exact replacement for session.ts's resolveTarget/els/nearMatches/register wiring; core applies it.
+
+**Done when.** tsc silent; `bun test tests/resolve.test.ts` passes; 6,000-element els under 150 ms (was 1,440); report numbers.
+
+## agentkit: opus-high (phase 2)
+
+**Goal.** `bx agent` on current models, honest about cost, with a benchmark that decides the escalation ladder, and fewer turns per task.
+
+**Read first.** Audit ITEMS G1–G6; `G:\code\bx\src\agent\driver.ts`, `G:\code\bx\src\agent\tools.ts`, `G:\code\bx\src\bench\bench.ts`; `C:\Users\dested\.bx\agent-log.jsonl` for history.
+
+**Decisions already made.**
+- G1: `MODEL_IDS` = `claude-haiku-5-5`, `claude-sonnet-5-5`, `claude-opus-5-5`. Prices per MTok input/output: haiku 0.10/0.50 (prompts ≤100K; 0.50/2.50 above), sonnet 2/10, opus 4/20; cache reads at 10% of input. Move them to `src/agent/pricing.ts` with `PRICES_CHECKED = "2026-10-12"`. Update the `--opus` help/comment text ("Opus 4.8" → "Opus 5.5") by sending the lead the cli.ts lines.
+- G2: `bun src/bench/bench.ts --agent-suite` runs ~12 fixed tasks against the fixture (login, add task, filter, settings toggle, game win via drive, a popup, a modal, a select) at a chosen tier, reporting pass rate, median turns, cost per tier, into `bench-agent-results.json`. Escalation changes: escalate only when the rung ended by stall detection or the model's own fail report; never after `budget`/`wall` endings. The escalation prompt carries the full action log for the tab (cap 3,000 chars, newest kept) plus a fresh els. Running the suite spends tokens: build it, run 2 tasks to prove it works, and ask the lead before a full run.
+- G3: add tools `bx_scroll` ({deltaY?, target?}: wheel, or scrollIntoView on a target) and `bx_tabs` ({action: "list"|"switch"|"close", id?}); `bx_console` passes the pin. Tool descriptions mention the right tool for `bx_snapshot`/`js`/`wait`/`bash` guesses.
+- G4: tools use action `then`/`delta` (show delta lines in the tool result), `els` diff after the first scan, `text` with `md` and main-content default, and `wait` conditions; `bx_wait` refuses `ms` > 1000 with a hint. These depend on core/resolver landing; build against the protocol types.
+- G5: `bx agent --vision` makes `bx_snap` return an image content block (JPEG q70, max 1024 wide, optional target crop).
+- G6: the lead rewrites SKILL.md numbers from your bench; send the numbers.
+
+**Owns.** `src/agent/**`, `src/bench/**`, `bench-agent-results.json`.
+
+**Done when.** tsc silent; `bun src/bench/bench.ts --agent-suite --tasks 2` passes on haiku; report pass/turns/cost.
+
+## infra: opus-high (phase 2)
+
+**Goal.** Observation knows its tab, the daemon stops churning, disk stops growing, flows isolate themselves and explain failures, and orphaned Chrome gets cleaned up.
+
+**Read first.** Audit ITEMS O1 O2(context) O5 D1 D3 D4 F1 F2 F3 R2; `G:\code\bx\src\daemon\observe.ts`, `debug.ts`, `record.ts`, `G:\code\bx\src\flows\*`.
+
+**Decisions already made.**
+- O1: entries carry `tab` (stable page id); console/net filter to the pinned tab unless `allTabs`; unpinned human commands see all tabs (unchanged). NetEntry gets `id` (monotonic) and `resourceType`; default net shows document/xhr/fetch only, `all` shows everything. `netBody {id}`: keep a WeakRef to the Playwright Response for the last 200 entries; text bodies only, capped at TEXT_MAX_CHARS. Invalid regex → escaped literal. The RingBuffer becomes a true circular buffer. Hand core the observe-API changes it must call (send the lead the lines).
+- D4: `/debug?light=1` skips per-page CDP sessions and Performance.getMetrics (pages listed with id/url only). DEBUG_VERSION stays 1.
+- O5: harness routes require `?n=<nonce>` (crypto.randomUUID per recording); the harness page carries it on every fetch.
+- D3: tmp-video removed in a finally; on daemon start, snaps older than `BX_SNAP_DAYS` (default 7) are deleted from `~/.bx/snaps` (only files bx named, `*.png`/`*.jpg`).
+- R2/D1: new `src/daemon/orphans.ts` (node:* only): `findProfileChromes(profileDir) → {pid, cmdline}[]` via `powershell -NoProfile -Command Get-CimInstance Win32_Process -Filter "Name='chrome.exe'"` JSON; `clearProfileLocks(profileDir)` kills orphans (no live daemon for that profile) and removes `SingletonLock`/`lockfile`/`SingletonCookie`/`SingletonSocket`. New `src/maintenance.ts` (Bun side): `doctor({fix})` (orphan Chromes, stale run files, locks, oversized logs) and `gc({olderThanDays=14, caches, yes, keep})`: lists profiles with size and last use (newest mtime of `<profile>/Default/Preferences`, `<profile>/Local State` and its log); dry run unless `yes`; never `default`, never a profile with a live daemon, never one in `keep`; `caches` deletes `Default/Cache`, `Default/Code Cache`, `Default/GPUCache`, `GrShaderCache`, `ShaderCache`, `Default/Service Worker/CacheStorage` only. The lead wires `bx doctor` and `bx gc` in cli.ts.
+- F1: FlowContext opens its own tab (`tabNew background`), pins every step to it, closes it in a finally; `runFlow` accepts and passes `headless`. F2: a failed step keeps the BxError (near matches printed), saves `<flow>.fail.png` and `<flow>.fail-els.txt` next to the flow. F3: synthesized password fills emit `process.env.BX_<FLOWNAME>_PASSWORD ?? ""` with the TODO kept; `expectNoConsoleErrors()` and `expectJs(expr)` on FlowContext; mutating `js` steps (any js command in the log) synthesize to `await b.js(...)`.
+
+**Owns.** `src/daemon/observe.ts`, `src/daemon/debug.ts`, `src/daemon/record.ts` (until V1), `src/daemon/actionLog.ts`, `src/daemon/orphans.ts`, `src/maintenance.ts`, `src/flows/**`, `tests/flows.test.ts`, `tests/record.test.ts`, `tests/maintenance.test.ts`.
+
+**Done when.** tsc silent; unit tests pass; `gc` dry run lists real profiles on this machine without deleting anything (paste the top 10); `doctor` output pasted.
+
 ## Standing answers
 
 - (2026-10-12, lead) Batch mode is client-only: `bx -` and `bx do` loop POST /cmd in one process. No `/batch` endpoint. Applies to: all.
@@ -120,7 +189,7 @@ Board: down · Last pushed: b3dc301 (origin/main; local main ahead, unpushed) ·
 | core | opus-high | session.ts, daemon.ts, serialize.ts | wave 1 sample | — | running |
 | lead | — | cli, client, protocol, constants, script | R5 S2 S3 C7 A1-cli | aafd640 | done: CLI js 1 94→67 ms (bun floor 45), bx do 20 cmds 105 ms |
 
-Live tool: global bx → G:\codex-live (a80f037), relinked by Sal 2026-10-12.
+Live tool: global bx → G:/code/bx-live (a80f037), relinked by Sal 2026-10-12.
 Background jobs: none
 Waiting on Sal: sample approval (after core reports)
 Next: review core's sample, then spawn resolver, agentkit, infra
