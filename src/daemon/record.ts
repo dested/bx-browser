@@ -432,15 +432,9 @@ async function runDistill(session: Session, dir: string, title: string, segments
 
   let page: Page | null = null;
   try {
-    // A background tab: it never becomes active, and the operator's tab is
-    // brought back to the front (Chrome foregrounds a new tab by itself).
-    await session.tabs();
-    const context = session.liveContext;
-    if (!context) throw { code: "internal", message: "browser is not running" };
-    const stay = activePage(session);
-    const opened = await context.newPage();
+    // bx's own page: never in tabs, indexes or the active slot (K7).
+    const opened = await session.openInternalPage();
     page = opened;
-    if (stay && !stay.isClosed()) await stay.bringToFront().catch(() => undefined);
 
     // The page reports progress into #log; carry it into any error, since the
     // daemon has no other view of what happened inside the browser.
@@ -456,7 +450,7 @@ async function runDistill(session: Session, dir: string, title: string, segments
     const deadline = Date.now() + DISTILL_TIMEOUT_MS;
     while (!finished && failure === null) {
       if (Date.now() > deadline) throw { code: "internal", message: `distill timed out${await harnessLog()}` };
-      if (opened.isClosed()) throw { code: "internal", message: "the distill tab was closed" };
+      if (opened.isClosed()) throw { code: "internal", message: "the distill page was closed" };
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
     if (failure !== null) throw { code: "internal", message: `distill failed: ${failure}${await harnessLog()}` };
@@ -472,11 +466,6 @@ async function runDistill(session: Session, dir: string, title: string, segments
 // ---------------------------------------------------------------------------
 // Capture
 // ---------------------------------------------------------------------------
-
-function activePage(session: Session): Page | undefined {
-  const id = session.activeTabId;
-  return id === undefined ? undefined : session.liveContext?.pages().find((p) => session.tabIdOf(p) === id);
-}
 
 /** The page for `tab`, or the active page; launches the browser if needed. */
 async function recordedPage(session: Session, tab: number | undefined): Promise<{ page: Page; tab: number }> {

@@ -223,6 +223,7 @@ live("live: start/mark/stop keeps tabs and typed state; the package lands, repor
   await Bun.sleep(500);
 
   const dir = path.join(liveOut, "live-basic");
+  const tabsBefore = JSON.stringify((await liveCmd<TabsResult>({ cmd: "tabs" })).pages);
   const t = performance.now();
   const stop = await liveCmd<RecordStopResult>({ cmd: "recordStop", outDir: dir });
   expect(performance.now() - t).toBeLessThan(2000);
@@ -232,7 +233,16 @@ live("live: start/mark/stop keeps tabs and typed state; the package lands, repor
   expect(transcript).toContain("— mark: after the password");
   expect(transcript).toContain("pressed Tab");
 
-  await distilled();
+  // The distill page is bx's own (K7): tabs, indexes and the active tab stay put while it runs.
+  let seenDistilling = 0;
+  const deadline = Date.now() + 60_000;
+  while ((await liveCmd<RecordStatusResult>({ cmd: "recordStatus" })).distilling.length > 0) {
+    expect(JSON.stringify((await liveCmd<TabsResult>({ cmd: "tabs" })).pages)).toBe(tabsBefore);
+    seenDistilling++;
+    if (Date.now() > deadline) throw new Error("distill still running after 60 s");
+    await Bun.sleep(25);
+  }
+  expect(seenDistilling).toBeGreaterThan(0);
   const report = readFileSync(stop.reportPath, "utf8");
   expect(report).not.toMatch(/spoken|speaker|speech/i);
   expect(existsSync(path.join(dir, "rec-01", "walkthrough.webm"))).toBe(false);
