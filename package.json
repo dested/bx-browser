@@ -21,6 +21,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build:harness": "bun scripts/build-harness.ts",
+    "build:frontdoor": "bun scripts/build-frontdoor.ts",
     "bench": "bun src/bench/bench.ts",
     "test": "bun test"
   },
