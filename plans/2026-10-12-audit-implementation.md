@@ -210,6 +210,7 @@ All optional fields; the full text is in `G:\code\bx\src\protocol.ts` once lande
 - (2026-10-12, lead) core queue gains infra handoff-1 S1–S9 + D1–D3 (scratchpad\infra\handoff-1.md) after its current item, before resolver wiring. Applies to: core, infra.
 - (2026-10-12, lead) infra R2b: gc and doctor --fix never recurse into a symlink/junction; report `skipped: link`, with a unit test. Applies to: infra.
 - (2026-10-12, lead) A real `bx gc --yes` (168 profiles, 12.7 GB) needs Sal's yes; the lead may delete only core-dev, core-smoke, bxlivecheck and this run's agent profiles. Applies to: lead.
+- (2026-10-12, lead) Never run chrome.exe directly or touch Sal's own Chrome; read versions from file VersionInfo or Playwright's browser.version(). Applies to: all.
 - (2026-10-12, lead) Hand-offs that touch another owner's file go to the lead as exact replacement text in a scratch file (path in the message); the lead forwards to the owner. Applies to: resolver, infra, agentkit.
 
 ## Ledger (lead, updated 2026-10-12)
@@ -219,10 +220,10 @@ Board: down · Last pushed: b3dc301 (origin/main; local main ahead, unpushed) ·
 | Agent | Model | Owns | Item now | Last sha / artifact | Status |
 | --- | --- | --- | --- | --- | --- |
 | scout | opus-xhigh | research report | Q1–Q3 | — | running |
-| core | opus-high | session.ts, daemon.ts, serialize.ts | S4 → A3 A2 C6 G3-daemon, wiring | SP1 df432a5, SP2 b1fe0a1, O2 cf3be03, C4 b29a494, C5 09110b9 (all passed) | running |
+| core | opus-high | session.ts, daemon.ts, serialize.ts | A2 → C6 → G3-daemon → infra S1–S9/D1–D3 → resolver wiring | SP1 SP2 O2 C4 C5 S4 6f263e5 A3 f0e821b (all passed) | running |
 | resolver | opus-high | resolve.ts, distill.ts, tests/resolve.test.ts | C1 C2 C3 C8 S5 | — | running |
-| agentkit | opus-high | src/agent/**, src/bench/** | G1–G5 done; G2 full run waits on a lead sha | 483656a, b8f4ade | idle (passed) |
-| infra | opus-high | observe, debug, record, actionLog, orphans, maintenance, flows, tests/observe.test.ts | R2b (link guard); observe test commit | 10098d7 081f4d6 6c13b46 112cbcf 10a070c (passed) | running |
+| agentkit | opus-high | src/agent/**, src/bench/** | waits on lead sha for full run | 483656a b8f4ade 132f915 (passed) | idle |
+| infra | opus-high | observe, debug, record, actionLog, orphans, maintenance, flows, tests/observe.test.ts | R2b link guard; debug.ts shim swap after core S8 | …10a070c, 8a03963 (passed) | running |
 | lead | — | cli, client, protocol, constants, script | doctor/gc wired; agentkit + infra handoffs | 98a40d2 | next: resolver wiring forward, gate |
 
 Live tool: global bx → G:/code/bx-live (a80f037), relinked by Sal 2026-10-12.
