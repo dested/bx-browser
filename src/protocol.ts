@@ -19,6 +19,23 @@ export interface RunFile {
   startedAt: string; // ISO
 }
 
+// ---------------------------------------------------------------------------
+// POST /argv (token): bx.exe's front door (dotnet/bx). A whole bx command line
+// in; the bytes the Bun CLI would print out. Verbs only the CLI runs (stdin,
+// spawning, disk sweeps, other daemons) answer {fallback: true} and bx.exe
+// runs `bun src/cli.ts` instead. 400/401/404 also mean "nothing ran".
+// ---------------------------------------------------------------------------
+
+export interface ArgvRequest {
+  argv: string[]; // process argv after the exe, unrepaired (MSYS repair runs daemon-side)
+  cwd: string; // the caller's working directory; relative paths resolve against it
+  pid?: number; // for the client tag
+  // Only these are read; anything else is ignored.
+  env: { BX_TIMING?: string; MSYSTEM?: string; EXEPATH?: string; CLAUDE_CODE_SESSION_ID?: string };
+}
+
+export type ArgvResponse = { stdout: string; stderr: string; exit: number } | { fallback: true };
+
 // Directory names, the client and deadline headers live in constants.ts (no
 // zod there, so the CLI's hot path can load them cheaply).
 export {
@@ -291,8 +308,44 @@ export const CmdSchema = z.discriminatedUnion("cmd", [
   // "others": close every tab but the active one. "all": close every tab,
   // leaving a single blank tab so the context (and daemon) stays alive.
   z.object({ cmd: z.literal("tabClose"), scope: z.enum(["others", "all"]).optional(), ...tabPin }),
-  z.object({ cmd: z.literal("recordStart"), slug: z.string().regex(/^[a-z0-9-]+$/) }),
-  z.object({ cmd: z.literal("recordStop"), outDir: z.string() }), // absolute dir for the package
+  // Recording (V1): one tab over CDP Page.startScreencast piped into ffmpeg. No
+  // context relaunch: tabs, typed values and page ids survive start and stop.
+  // tab: record that tab (default: the active one). follow: re-target whenever
+  // the active tab changes (tab select / popup activation). ring: keep only the
+  // newest <ring> seconds (cap 600) in memory; `recordSave` clips from it and
+  // `recordStop` packages whatever the ring holds. fps: screencast pacing
+  // (default 30; output is constant 25 fps webm, frames duplicated as needed).
+  z.object({
+    cmd: z.literal("recordStart"),
+    slug: z.string().regex(/^[a-z0-9-]+$/),
+    tab: z.number().int().positive().optional(),
+    follow: z.boolean().optional(),
+    ring: z.number().int().min(5).max(600).optional(),
+    fps: z.union([z.literal(30), z.literal(60)]).optional(),
+  }),
+  // outDir: absolute dir for the package. Returns as soon as video, transcript
+  // and recording.json are written; distill (report.md) runs in the background
+  // unless `distill` is true, in which case stop waits for it. mp4: also write
+  // video.mp4 (system ffmpeg with x264; error `bad_request` when unavailable).
+  z.object({
+    cmd: z.literal("recordStop"),
+    outDir: z.string(),
+    distill: z.boolean().optional(),
+    mp4: z.boolean().optional(),
+  }),
+  // A chapter marker in the action log (and the report). Requires a recording.
+  z.object({ cmd: z.literal("recordMark"), text: z.string().min(1).max(200) }),
+  // Ring mode only: encode the newest `lastSecs` seconds into a package at
+  // outDir while capture continues. Error `not_recording` without a ring.
+  z.object({
+    cmd: z.literal("recordSave"),
+    lastSecs: z.number().int().min(1).max(600),
+    outDir: z.string(),
+    mp4: z.boolean().optional(),
+  }),
+  z.object({ cmd: z.literal("recordStatus") }),
+  // Re-run distill on an existing package dir (writes report.md).
+  z.object({ cmd: z.literal("recordDistill"), dir: z.string() }),
   z.object({ cmd: z.literal("status") }),
   z.object({ cmd: z.literal("actionLog"), sinceIndex: z.number().int().nonnegative().optional() }),
 ]);
@@ -421,12 +474,35 @@ export interface DriveResult {
 }
 // created: set by tabNew — the page it made
 export interface TabsResult { pages: PageInfo[]; created?: PageInfo }
-export interface RecordStartResult { slug: string }
+export interface RecordStartResult {
+  slug: string;
+  tab: number; // the tab being captured
+  ring?: number; // seconds kept, in ring mode
+  firstFrameMs: number; // start → first frame (start fails with `internal` past 1000)
+}
 export interface RecordStopResult {
   dir: string; // recordings/<slug>/
-  reportPath: string; // <dir>/report.md
-  videoPath: string; // raw webm kept alongside
+  videoPath: string; // <dir>/video.webm (written once)
+  mp4Path?: string; // <dir>/video.mp4 when asked for
+  transcriptPath: string; // <dir>/transcript.txt: action log + marks, timestamped
+  metaPath: string; // <dir>/recording.json: frame times, tabs, marks
+  reportPath: string; // <dir>/report.md, present once distill has run
+  distill: "done" | "running" | "failed"; // "running": it finishes in the background
+  durationMs: number;
+  frames: number;
   actionCount: number;
+}
+export interface RecordStatusResult {
+  recording: boolean;
+  slug?: string;
+  tab?: number;
+  follow?: boolean;
+  ring?: number; // seconds kept (ring mode)
+  elapsedMs?: number;
+  frames?: number;
+  bufferedBytes?: number; // ring mode: bytes held
+  marks?: number;
+  distilling: string[]; // package dirs whose background distill is still running
 }
 export interface StatusResult {
   profile: string;
