@@ -54,7 +54,7 @@ A file nobody owns: ask the lead before touching it.
 - Edit only your owned paths. Scratch goes in `C:\Users\dested\AppData\Local\Temp\claude\G--code-bx\59a40366-a580-4bd0-94fc-275be2815c92\scratchpad\<your name>\`.
 - Commit only with `bash ~/.claude/sal/bin/commit-paths.sh "<msg> (<your name>)" <your paths>`. No push, stash, reset, checkout --, restore, clean, amend or worktree.
 - Shared files (protocol.ts above all): send the lead the exact lines; the lead commits them.
-- Browser checks: `bun G:/code/bx/src/cli.ts --profile <yourname>-dev --headless …`. Never the global `bx`, never another agent's profile, never `bx stop --all`, never kill a Chrome you didn't start. Delete your profiles (`C:\Users\dested\.bx\profiles\<name>`, its log and run file) when done.
+- Browser checks: `bun G:/code/bx/src/cli.ts --profile <yourname>-dev --headless …`. Never the global `bx`, never another agent's profile, never `bx stop --all`, never kill a Chrome you didn't start. Stop your daemons when done and leave the profiles for `bx gc` (see Standing answers).
 - The daemon runs under Node 22 type stripping: node:* only, no Bun APIs, no enums/namespaces/parameter properties in `src/daemon/**`.
 - No `any`, no papering `as`, no ts-ignore. `bun x tsc --noEmit` silent before every `ready`.
 - No remote machines.
@@ -214,10 +214,13 @@ Board: down · Last pushed: b3dc301 (origin/main; local main ahead, unpushed) ·
 | Agent | Model | Owns | Item now | Last sha / artifact | Status |
 | --- | --- | --- | --- | --- | --- |
 | scout | opus-xhigh | research report | Q1–Q3 | — | running |
-| core | opus-high | session.ts, daemon.ts, serialize.ts | wave 1 sample: R1 D2 O4 S6 S1 R4 R3 O3 A1-daemon | 8e3d2a2 | ready, lead-reviewed (tsc 0, unit 17/17); idle awaiting Sal |
+| core | opus-high | session.ts, daemon.ts, serialize.ts | phase 2: SP1 SP2 O2 C4 C5 S4 A3 A2 C6, wiring | wave 1 8e3d2a2 (Sal approved) | running |
+| resolver | opus-high | resolve.ts, distill.ts, tests/resolve.test.ts | C1 C2 C3 C8 S5 | — | running |
+| agentkit | opus-high | src/agent/**, src/bench/** | G1–G6 | — | running |
+| infra | opus-high | observe, debug, record, actionLog, orphans, maintenance, flows | O1 O5 D1 D3 D4 F1 F2 F3 R2 | — | running |
 | lead | — | cli, client, protocol, constants, script | R5 S2 S3 C7 A1-cli | aafd640 | done: CLI js 1 94→67 ms (bun floor 45), bx do 20 cmds 105 ms |
 
 Live tool: global bx → G:/code/bx-live (a80f037), relinked by Sal 2026-10-12.
 Background jobs: none
-Waiting on Sal: sample approval (reported 2026-10-12); delete core-dev, core-smoke, bxlivecheck profiles (hook blocked core; lead won't proxy)
+Waiting on Sal: nothing. Sample approved 2026-10-12; leftover profiles go to `bx gc` (Sal: lead's call). Protocol phase 2 at 7b0db6f.
 Next: review core's sample, then spawn resolver, agentkit, infra
