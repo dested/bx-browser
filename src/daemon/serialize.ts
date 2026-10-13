@@ -290,6 +290,30 @@ export function jsFunctionSource(text: string): string {
   return compiles(asBody) ? asBody : asExpression;
 }
 
+/**
+ * K5: the SyntaxError message when `text` parses neither as an expression nor
+ * as statements (compiled as an async function body, not run), else null.
+ * Self-contained so the page can run it too: Node vets first, and the page
+ * confirms, since its V8 may know syntax Node's does not. A compile the page
+ * refuses for another reason (EvalError under a strict CSP) counts as "can't
+ * tell": null.
+ */
+export function jsSyntaxError(text: string): string | null {
+  const AsyncFunction: unknown = Object.getPrototypeOf(async () => undefined).constructor;
+  if (typeof AsyncFunction !== "function") return null;
+  const failure = (body: string): string | null => {
+    try {
+      Reflect.construct(AsyncFunction, [body]);
+      return null;
+    } catch (err) {
+      return err instanceof SyntaxError ? err.message : null;
+    }
+  };
+  if (failure(`return (${text}
+);`) === null) return null;
+  return failure(text);
+}
+
 /** Page-side program for `js`: run the caller's text, serialize what it produced. */
 export function jsProgram(text: string, maxChars: number): string {
   return `(async () => { const __bxValue = await ${jsFunctionSource(text)}(); return (${SERIALIZER_SOURCE})(__bxValue, ${maxChars}); })()`;

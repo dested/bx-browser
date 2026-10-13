@@ -37,7 +37,7 @@ import {
 import { ACTION_LOG_CAP, ActionLog } from "./actionLog.ts";
 import { nearMatches, refCount, resolveTarget as resolveIn, scanEls } from "./resolve.ts";
 import { seedOsPasswordCheck } from "./osPassword.ts";
-import { jsFunctionSource, jsProgram } from "./serialize.ts";
+import { jsFunctionSource, jsProgram, jsSyntaxError } from "./serialize.ts";
 import {
   attachObservers,
   createBuffers,
@@ -1748,6 +1748,14 @@ export class Session {
 
   async js(cmd: CmdOf<"js">): Promise<JsResult> {
     const page = await this.pageFor(cmd.tab);
+    // K5: code that doesn't parse is the caller's mistake, not an internal
+    // error. Node's verdict alone costs nothing; only a rejection is
+    // confirmed in the page, whose V8 may know newer syntax.
+    if (jsSyntaxError(cmd.expression) !== null) {
+      step("check syntax");
+      const pageSays = await page.evaluate(jsSyntaxError, cmd.expression).catch(() => null);
+      if (pageSays !== null) throw { code: "bad_request", message: `js: ${pageSays}` };
+    }
     // Statements are fine too: the last expression statement is the result.
     const source = jsProgram(cmd.expression, BUDGET.JS_MAX_CHARS);
     let out: unknown;

@@ -11,6 +11,7 @@ import {
   SERIALIZER_SOURCE,
   jsFunctionSource,
   jsProgram,
+  jsSyntaxError,
   lastStatementStart,
 } from "../src/daemon/serialize.ts";
 
@@ -175,6 +176,21 @@ describe("statement rewrite", () => {
     expect(lastStatementStart("'x;y'", true)).toBe(0);
     expect(lastStatementStart("a /* ; */ + b", false)).toBe(0);
     expect(lastStatementStart("// only a comment", true)).toBe(-1);
+  });
+
+  test("jsSyntaxError names a parse failure and nothing else", () => {
+    // V8 parses the body inside its own wrapper, so an unclosed call ends at its "}".
+    expect(jsSyntaxError("nope(")).toBe("Unexpected token '}'");
+    expect(jsSyntaxError("a b")).toBe("Unexpected identifier 'b'");
+    // Valid expressions, statements and top-level await compile.
+    expect(jsSyntaxError("document.title")).toBeNull();
+    expect(jsSyntaxError("const a = 1; a")).toBeNull();
+    expect(jsSyntaxError("await fetch('/x')")).toBeNull();
+    expect(jsSyntaxError("({ a: 1 })")).toBeNull();
+    expect(jsSyntaxError("1 // trailing comment")).toBeNull();
+    // Runtime failures, a SyntaxError from eval among them, are not parse failures.
+    expect(jsSyntaxError("throw new Error('x')")).toBeNull();
+    expect(jsSyntaxError("eval('(')")).toBeNull();
   });
 
   test("jsProgram evaluates end to end", async () => {
