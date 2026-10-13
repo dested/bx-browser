@@ -36,6 +36,8 @@ async function ensureDepBuilt(): Promise<void> {
     cwd: DEP_DIR,
     stdout: "pipe",
     stderr: "pipe",
+    // No console window when the daemon triggers a rebuild.
+    windowsHide: true,
   });
   const exitCode = await proc.exited;
 

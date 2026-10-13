@@ -17,11 +17,17 @@ import {
   recDirName,
 } from "video-to-prompt";
 import type { StageProgress, TranscriptSegment } from "video-to-prompt";
+import { actionLogWording, isRewordedFile, isVideoCopy } from "./wording.ts";
 
 interface HarnessMeta {
   title: string;
   segments: TranscriptSegment[];
 }
+
+const REPORT_OPTIONS = {
+  source: "bx record",
+  pathsHint: "the paths inside the recording's folder",
+};
 
 const logEl = document.getElementById("log");
 
@@ -100,18 +106,23 @@ async function run(): Promise<void> {
       rebuilt.set(`${dir}/transcript.txt`, buildTranscriptTxt(take.meta));
       rebuilt.set(`${dir}/recording.json`, buildRecordingJson(result.session, take));
     }
-    rebuilt.set("report.md", buildReport(result.session, result.takes));
-    rebuilt.set("MANIFEST.txt", buildManifestTxt(result.session, result.takes));
+    rebuilt.set("report.md", buildReport(result.session, result.takes, REPORT_OPTIONS));
+    rebuilt.set("MANIFEST.txt", buildManifestTxt(result.session, result.takes, REPORT_OPTIONS));
     log(`grafted ${meta.segments.length} action-log lines into the transcript`);
   }
 
-  log(`writing ${result.files.length} files…`);
-  for (const out of result.files) {
+  // The package already holds video.webm: the library's own copy is skipped,
+  // and the text files are reworded for an action log (see wording.ts).
+  const files = result.files.filter((out) => !isVideoCopy(out.path));
+  log(`writing ${files.length} files…`);
+  for (const out of files) {
     const replacement = rebuilt.get(out.path);
+    const text =
+      replacement ?? (isRewordedFile(out.path) ? await out.blob.text() : undefined);
     const bytes =
-      replacement === undefined
+      text === undefined
         ? new Uint8Array(await out.blob.arrayBuffer())
-        : new TextEncoder().encode(replacement);
+        : new TextEncoder().encode(isRewordedFile(out.path) ? actionLogWording(text) : text);
     await post("/harness/result", { path: out.path, base64: toBase64(bytes) });
   }
 

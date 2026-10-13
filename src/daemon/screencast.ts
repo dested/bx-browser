@@ -7,6 +7,7 @@
 // Node runtime (like the rest of src/daemon): node:* only, no Bun.*.
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -82,6 +83,92 @@ export class FramePacer {
 }
 
 // ---------------------------------------------------------------------------
+// Ring (pure — unit-tested in tests/screencast.test.ts)
+// ---------------------------------------------------------------------------
+
+export const RING_MAX_BYTES = 64 * 1024 * 1024;
+
+/**
+ * The newest `seconds` of frames in memory, encoded only on save or stop.
+ * One frame per 1/fps slot (the last one in a slot wins). The frame just
+ * before the window is kept: it is what the screen showed when the window
+ * opens. Over `maxBytes`, the oldest frames go first.
+ */
+export class FrameRing {
+  private frames: Frame[] = [];
+  private held = 0;
+  private readonly windowMs: number;
+  private readonly fps: number;
+  private readonly maxBytes: number;
+
+  constructor(seconds: number, fps: number, maxBytes = RING_MAX_BYTES) {
+    this.windowMs = seconds * 1000;
+    this.fps = fps;
+    this.maxBytes = maxBytes;
+  }
+
+  get bytes(): number {
+    return this.held;
+  }
+
+  get length(): number {
+    return this.frames.length;
+  }
+
+  /** Arrival time of the oldest frame kept, or null when empty. */
+  get oldestAt(): number | null {
+    return this.frames[0]?.at ?? null;
+  }
+
+  /** Integer math: at / (1000 / fps) lands a hair under the boundary (29.9999). */
+  private slot(at: number): number {
+    return Math.floor((at * this.fps) / 1000);
+  }
+
+  push(frame: Frame): void {
+    const last = this.frames[this.frames.length - 1];
+    if (last && this.slot(last.at) === this.slot(frame.at)) {
+      this.frames.pop();
+      this.held -= last.data.length;
+    }
+    this.frames.push(frame);
+    this.held += frame.data.length;
+    this.trim(frame.at);
+  }
+
+  /** Drop what fell out of the window as of `now`. */
+  trim(now: number): void {
+    const start = now - this.windowMs;
+    const count = this.frames.length;
+    const size = (i: number): number => this.frames[i]?.data.length ?? 0;
+    let drop = 0;
+    let freed = 0;
+    // frames[drop + 1] already covers the window start, so frames[drop] is not needed.
+    while (drop + 1 < count && (this.frames[drop + 1]?.at ?? Infinity) <= start) freed += size(drop++);
+    while (this.held - freed > this.maxBytes && drop + 1 < count) freed += size(drop++);
+    if (drop === 0) return;
+    this.held -= freed;
+    this.frames = this.frames.slice(drop);
+  }
+
+  /**
+   * The frames that show [from, now]: the one on screen at `from` (moved up
+   * to `from`), then every later one. From before the oldest frame: everything.
+   */
+  clip(from: number): Frame[] {
+    let first = 0;
+    for (let i = 0; i < this.frames.length; i++) {
+      const frame = this.frames[i];
+      if (frame && frame.at <= from) first = i;
+    }
+    const out = this.frames.slice(first);
+    const head = out[0];
+    if (head && head.at < from) out[0] = { data: head.data, at: from };
+    return out;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // ffmpeg (Playwright's bundled build: VP8 webm or PNG, nothing else)
 // ---------------------------------------------------------------------------
 
@@ -137,8 +224,11 @@ function even(n: number): number {
   return Math.max(2, Math.ceil(n / 2) * 2);
 }
 
-/** recordVideo's VP8 settings, fed JPEGs over a pipe at a constant 25 fps. */
-export function vp8Args(file: string, size: { width: number; height: number }): string[] {
+/**
+ * recordVideo's VP8 settings, fed JPEGs over a pipe at a constant 25 fps.
+ * One thread keeps up live; a ring encoded at save time gets more.
+ */
+export function vp8Args(file: string, size: { width: number; height: number }, threads = 1): string[] {
   const w = even(size.width);
   const h = even(size.height);
   return [
@@ -147,7 +237,7 @@ export function vp8Args(file: string, size: { width: number; height: number }): 
     "-framerate", String(OUTPUT_FPS), "-c:v", "mjpeg", "-i", "pipe:0",
     "-y", "-an", "-r", String(OUTPUT_FPS),
     "-c:v", "vp8", "-qmin", "0", "-qmax", "50", "-crf", "8", "-deadline", "realtime", "-speed", "8",
-    "-b:v", "1M", "-threads", "1",
+    "-b:v", "1M", "-threads", String(threads),
     "-vf", `pad=${w}:${h}:0:0:gray,crop=${w}:${h}:0:0`,
     file,
   ];
@@ -172,9 +262,14 @@ export class Vp8Encoder {
   private readonly exited: Promise<number>;
   private readonly timer: ReturnType<typeof setInterval> | null;
 
-  constructor(ffmpegPath: string, file: string, size: { width: number; height: number }, opts: { live?: boolean } = {}) {
+  constructor(
+    ffmpegPath: string,
+    file: string,
+    size: { width: number; height: number },
+    opts: { live?: boolean; threads?: number } = {},
+  ) {
     this.file = file;
-    this.proc = spawn(ffmpegPath, vp8Args(file, size), {
+    this.proc = spawn(ffmpegPath, vp8Args(file, size, opts.threads), {
       stdio: ["pipe", "ignore", "pipe"],
       windowsHide: true,
     });
@@ -218,6 +313,21 @@ export class Vp8Encoder {
     for (let i = 0; i < copies; i++) stdin.write(frame);
   }
 
+  /** Resolves once ffmpeg has taken what was written (a burst encode waits on it). */
+  async drained(): Promise<void> {
+    const stdin = this.proc.stdin;
+    if (!stdin || !stdin.writableNeedDrain || this.failed !== null) return;
+    await new Promise<void>((resolve) => {
+      const done = (): void => {
+        stdin.off("drain", done);
+        stdin.off("close", done);
+        resolve();
+      };
+      stdin.on("drain", done);
+      stdin.on("close", done);
+    });
+  }
+
   /** Pads the held frame out to `endAt` (Date.now()), closes stdin and waits for ffmpeg. */
   async close(endAt: number): Promise<void> {
     if (this.timer) clearInterval(this.timer);
@@ -250,9 +360,13 @@ export interface CaptureOptions {
 export class PageScreencast {
   readonly page: Page;
   private readonly cdp: CDPSession;
-  private stopped = false;
+  private ended = false;
   /** Frames Chrome has sent. */
   frames = 0;
+
+  get stopped(): boolean {
+    return this.ended;
+  }
 
   private constructor(page: Page, cdp: CDPSession) {
     this.page = page;
@@ -268,7 +382,7 @@ export class PageScreencast {
     const cdp = await context.newCDPSession(page);
     const capture = new PageScreencast(page, cdp);
     cdp.on("Page.screencastFrame", (event) => {
-      if (capture.stopped) return;
+      if (capture.ended) return;
       // Ack first: Chrome holds the next frame until this one is acked.
       cdp.send("Page.screencastFrameAck", { sessionId: event.sessionId }).catch(() => undefined);
       capture.frames++;
@@ -303,9 +417,95 @@ export class PageScreencast {
 
   /** Stops frames at once; safe on a closed page. */
   async stop(): Promise<void> {
-    if (this.stopped) return;
-    this.stopped = true;
+    if (this.ended) return;
+    this.ended = true;
     await this.cdp.send("Page.stopScreencast").catch(() => undefined);
     await this.cdp.detach().catch(() => undefined);
+  }
+}
+
+/** Encodes buffered frames (a ring clip) into one webm ending at `endAt`; resolves with frames written. */
+export async function encodeClip(
+  ffmpegPath: string,
+  file: string,
+  size: { width: number; height: number },
+  frames: readonly Frame[],
+  endAt: number,
+): Promise<number> {
+  const encoder = new Vp8Encoder(ffmpegPath, file, size, { threads: 4 });
+  for (const frame of frames) {
+    encoder.push(frame.data, frame.at);
+    await encoder.drained();
+  }
+  await encoder.close(endAt);
+  return encoder.written;
+}
+
+// ---------------------------------------------------------------------------
+// Processes and the system ffmpeg (mp4)
+// ---------------------------------------------------------------------------
+
+export interface ProcessResult {
+  code: number;
+  output: string;
+}
+
+/**
+ * Runs an executable with no shell and no console window (windowsHide, every
+ * stdio piped or ignored). `exe` must be a full path: without a shell,
+ * Windows applies no PATHEXT, so resolve names with findOnPath first.
+ */
+export function runProcess(exe: string, args: string[], cwd?: string): Promise<ProcessResult> {
+  return new Promise((resolve) => {
+    const proc = spawn(exe, args, { cwd, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    let output = "";
+    const keep = (chunk: Buffer): void => {
+      output = (output + chunk.toString()).slice(-20_000);
+    };
+    proc.stdout.on("data", keep);
+    proc.stderr.on("data", keep);
+    proc.on("error", (err) => resolve({ code: -1, output: `${output}${String(err)}` }));
+    proc.on("close", (code) => resolve({ code: code ?? -1, output }));
+  });
+}
+
+/**
+ * `name` on PATH, or null. Windows looks for `.exe` only: a `.cmd` shim
+ * cannot be spawned without a shell, and bx never spawns through one.
+ */
+export function findOnPath(name: string): string | null {
+  const exts = process.platform === "win32" ? [".exe"] : [""];
+  for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
+    if (dir === "") continue;
+    for (const ext of exts) {
+      const full = path.join(dir, name + ext);
+      if (existsSync(full)) return full;
+    }
+  }
+  return null;
+}
+
+let x264: Promise<string | null> | null = null;
+
+/** The system ffmpeg when it has libx264 (Playwright's build has no H.264), else null. Checked once. */
+export function systemX264Ffmpeg(): Promise<string | null> {
+  x264 ??= (async () => {
+    const exe = findOnPath("ffmpeg");
+    if (exe === null) return null;
+    const probe = await runProcess(exe, ["-hide_banner", "-encoders"]);
+    return probe.code === 0 && /\blibx264\b/.test(probe.output) ? exe : null;
+  })();
+  return x264;
+}
+
+/** webm → H.264 mp4 (about 4.5x smaller on app pages, plays inline in more places). */
+export async function transcodeMp4(ffmpegPath: string, webm: string, mp4: string): Promise<void> {
+  const result = await runProcess(ffmpegPath, [
+    "-loglevel", "error", "-y", "-i", webm,
+    "-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+    mp4,
+  ]);
+  if (result.code !== 0) {
+    throw { code: "internal", message: `mp4 encode failed: ${result.output.trim().split("\n").slice(-3).join(" | ")}` };
   }
 }
