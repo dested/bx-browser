@@ -1,13 +1,13 @@
-// Replays a flow file. Zero model tokens: import the module, run its steps,
-// print a one-line verdict. On failure, surface the console errors that most
-// often explain it.
+// Replays a flow file. Zero model tokens: import the module, run its steps in
+// a tab of their own, print a one-line verdict. On failure, print the near
+// matches, save a screenshot and an els dump beside the flow, and surface the
+// tab's console errors that most often explain it.
 
 import { plugin } from "bun";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
-import { CliError, cmd, formatConsoleEntry } from "../client.ts";
-import type { ConsoleEntry } from "../protocol.ts";
-import { FlowAssertionError, FlowContext } from "./api.ts";
+import { CliError, cmd, formatConsoleEntry, renderEl } from "../client.ts";
+import { FlowAssertionError, FlowContext, FlowStepError } from "./api.ts";
 import type { Flow } from "./api.ts";
 
 const FAILURE_CONSOLE_LINES = 5;
@@ -68,9 +68,15 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** `<dir>/<name>` of a flow file minus `.flow.ts` (or its extension): failure artifacts sit beside it. */
+export function failureBase(abs: string): string {
+  const name = path.basename(abs).replace(/\.flow\.[cm]?[jt]sx?$/i, "").replace(/\.[cm]?[jt]sx?$/i, "");
+  return path.join(path.dirname(abs), name);
+}
+
 export async function runFlow(
   file: string,
-  opts: { profile: string; record: boolean },
+  opts: { profile: string; record: boolean; headless?: boolean },
 ): Promise<boolean> {
   const abs = path.resolve(process.cwd(), file);
   aliasFlowImport(abs);
@@ -80,23 +86,29 @@ export async function runFlow(
     throw new CliError(2, `not a flow file — default-export flow(name, fn): ${abs}`);
   }
 
+  const start = opts.headless === undefined ? undefined : { headless: opts.headless };
   const slug = slugify(flow.name);
   let recording = false;
   if (opts.record) {
-    const res = await cmd(opts.profile, { cmd: "recordStart", slug });
+    const res = await cmd(opts.profile, { cmd: "recordStart", slug }, start);
     if (!res.ok) throw new CliError(1, `could not start recording: ${res.error.message}`);
     recording = true;
   }
 
   let lastLabel = "start";
   let steps = 0;
-  const ctx = new FlowContext(opts.profile, {
-    onStep(label, ms) {
-      steps++;
-      lastLabel = label;
-      process.stdout.write(`  • ${label} (${ms}ms)\n`);
+  const ctx = new FlowContext(
+    opts.profile,
+    {
+      onStep(label, ms) {
+        steps++;
+        lastLabel = label;
+        process.stdout.write(`  • ${label} (${ms}ms)\n`);
+      },
     },
-  });
+    // A recording captures the tab the flow drives, which must be in front to paint.
+    { headless: opts.headless, background: !opts.record },
+  );
 
   const started = Date.now();
   try {
@@ -104,9 +116,7 @@ export async function runFlow(
     process.stdout.write(`PASS ${flow.name} (${Date.now() - started}ms, ${steps} steps)\n`);
     return true;
   } catch (err) {
-    const message = err instanceof FlowAssertionError ? err.detail : errorMessage(err);
-    process.stdout.write(`FAIL ${flow.name} at ${lastLabel}: ${message}\n`);
-    await printConsoleErrors(opts.profile);
+    await reportFailure(ctx, flow.name, lastLabel, err, failureBase(abs));
     return false;
   } finally {
     if (recording) {
@@ -115,14 +125,26 @@ export async function runFlow(
       if (!res.ok) process.stderr.write(`✗ recording: ${res.error.message}\n`);
       else process.stdout.write(`recording → ${outDir}\n`);
     }
+    // Only after recordStop: closing the tab first would drop its video.
+    await ctx.close();
   }
 }
 
-async function printConsoleErrors(profile: string): Promise<void> {
-  const res = await cmd<ConsoleEntry[]>(profile, { cmd: "console" });
-  if (!res.ok) return;
-  const errors = res.data.filter((e) => e.level === "error" || e.level === "pageerror");
-  for (const entry of errors.slice(-FAILURE_CONSOLE_LINES)) {
+async function reportFailure(ctx: FlowContext, name: string, label: string, err: unknown, base: string): Promise<void> {
+  const message =
+    err instanceof FlowAssertionError
+      ? err.detail
+      : err instanceof FlowStepError
+        ? `${err.error.code}: ${err.error.message}`
+        : errorMessage(err);
+  process.stdout.write(`FAIL ${name} at ${label}: ${message}\n`);
+  const near = err instanceof FlowStepError ? (err.error.nearMatches ?? []) : [];
+  if (near.length > 0) {
+    process.stdout.write("  near matches:\n");
+    for (const el of near) process.stdout.write(`    ${renderEl(el)}\n`);
+  }
+  for (const saved of await ctx.captureFailure(base)) process.stdout.write(`  saved ${saved}\n`);
+  for (const entry of (await ctx.consoleErrors()).slice(-FAILURE_CONSOLE_LINES)) {
     process.stdout.write(`  ${formatConsoleEntry(entry)}\n`);
   }
 }

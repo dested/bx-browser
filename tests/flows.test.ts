@@ -9,8 +9,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { aliasFlowImport } from "../src/flows/runner.ts";
-import { synthesizeFlow } from "../src/flows/synthesize.ts";
+import { aliasFlowImport, failureBase } from "../src/flows/runner.ts";
+import { passwordEnvVar, synthesizeFlow } from "../src/flows/synthesize.ts";
 import type { ActionLogEntry, Cmd } from "../src/protocol.ts";
 
 const FIXTURE_URL = "http://127.0.0.1:9999/fixture";
@@ -108,4 +108,39 @@ test(`"bx/flow" resolves from a flow file outside the repo`, async () => {
   expect(typeof def === "object" && def !== null).toBe(true);
   expect(Reflect.get(Object(def), "name")).toBe("outside");
   expect(typeof Reflect.get(Object(def), "fn")).toBe("function");
+});
+
+test("synthesizeFlow replays password fills from BX_<FLOW>_PASSWORD", () => {
+  const src = synthesizeFlow([
+    entry({ cmd: "fill", target: { text: "Password" }, value: "•••" }, 'filled "Password" with "•••"', "Password"),
+  ], "log in: demo");
+  expect(passwordEnvVar("log in: demo")).toBe("BX_LOG_IN_DEMO_PASSWORD");
+  expect(src).toContain(`  await b.fill("Password", process.env.BX_LOG_IN_DEMO_PASSWORD ?? "");`);
+  expect(src).toContain("TODO");
+  expect(src).not.toContain("•••");
+});
+
+test("synthesizeFlow replays js steps and keeps target prefixes", () => {
+  const src = synthesizeFlow([
+    entry({ cmd: "js", expression: "localStorage.setItem('k', '1')" }, "ran js"),
+    entry({ cmd: "click", target: { role: "button", name: "Save" } }, 'clicked "Save"'),
+    entry({ cmd: "click", target: { testid: "add-task" } }, 'clicked "add-task"'),
+    entry({ cmd: "fill", target: { label: "Email" }, value: "a@b.c" }, 'filled "Email"'),
+  ], "js and prefixes");
+  expect(src).toContain(`  await b.js(${JSON.stringify("localStorage.setItem('k', '1')")});`);
+  expect(src).toContain(`  await b.click("role:button:Save");`);
+  expect(src).toContain(`  await b.click("testid:add-task");`);
+  expect(src).toContain(`  await b.fill("label:Email", "a@b.c");`);
+});
+
+test("failureBase puts fail artifacts beside the flow file", () => {
+  const dir = path.join(os.tmpdir(), "flows");
+  expect(failureBase(path.join(dir, "login.flow.ts"))).toBe(path.join(dir, "login"));
+  expect(failureBase(path.join(dir, "checkout.ts"))).toBe(path.join(dir, "checkout"));
+});
+
+test("synthesizeFlow collapses a js poll repeated back to back", () => {
+  const poll = entry({ cmd: "js", expression: "window.__game.won" }, "ran js");
+  const src = synthesizeFlow([poll, { ...poll, index: 99 }, { ...poll, index: 100 }], "poll");
+  expect(src.split("\n").filter((l) => l.includes("b.js(")).length).toBe(1);
 });

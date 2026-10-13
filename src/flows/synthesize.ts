@@ -17,13 +17,20 @@ function q(s: string): string {
   return JSON.stringify(s);
 }
 
+/** The target in the string form parseTarget reads back (prefixes kept). */
 function textOf(target: Target): string {
   if ("text" in target) return target.text;
   if ("selector" in target) return target.selector;
-  if ("testid" in target) return target.testid;
-  if ("label" in target) return target.label;
-  if ("role" in target) return target.name ?? target.role;
+  if ("testid" in target) return `testid:${target.testid}`;
+  if ("label" in target) return `label:${target.label}`;
+  if ("role" in target) return target.name === undefined ? `role:${target.role}` : `role:${target.role}:${target.name}`;
   return String(target.ref);
+}
+
+/** `BX_<FLOW>_PASSWORD`: the env var a recorded password fill replays from. */
+export function passwordEnvVar(flowName: string): string {
+  const slug = flowName.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  return `BX_${slug === "" ? "FLOW" : slug}_PASSWORD`;
 }
 
 function stable(entry: ActionLogEntry, target: Target): string {
@@ -35,7 +42,7 @@ function options(parts: string[]): string {
   return parts.length === 0 ? "" : `, { ${parts.join(", ")} }`;
 }
 
-function linesFor(entry: ActionLogEntry): string[] {
+function linesFor(entry: ActionLogEntry, flowName: string): string[] {
   let raw: unknown;
   try {
     raw = JSON.parse(entry.cmdJson);
@@ -53,9 +60,10 @@ function linesFor(entry: ActionLogEntry): string[] {
       return [`await b.click(${q(stable(entry, c.target))});`];
     case "fill":
       if (entry.text.includes(REDACTED_MARK)) {
+        const envVar = passwordEnvVar(flowName);
         return [
-          "// TODO: value redacted at record time — this was a password field",
-          `await b.fill(${q(stable(entry, c.target))}, "");`,
+          `// TODO: value redacted at record time (a password field) — set ${envVar} to replay it`,
+          `await b.fill(${q(stable(entry, c.target))}, process.env.${envVar} ?? "");`,
         ];
       }
       return [`await b.fill(${q(stable(entry, c.target))}, ${q(c.value)});`];
@@ -99,6 +107,9 @@ function linesFor(entry: ActionLogEntry): string[] {
       ];
       return [`await b.wheel(${c.deltaY}${options(opts)});`];
     }
+    // Any js in the log replays: it may have changed state the later steps need.
+    case "js":
+      return [`await b.js(${q(c.expression)});`];
     case "back":
       return ["await b.back();"];
     case "reload":
@@ -126,12 +137,18 @@ export function synthesizeFlow(entries: ActionLogEntry[], name: string): string 
   // opens of one url are noise. A later re-open with anything emitted in
   // between is a real navigation and survives.
   let lastOpenUrl: string | null = null;
+  // Likewise a js poll repeated back to back (an agent checking its win
+  // predicate) replays once.
+  let lastJs: string | null = null;
   for (const entry of entries) {
     const url = openUrlOf(entry);
     if (url !== null && url === lastOpenUrl) continue;
-    const lines = linesFor(entry);
+    const lines = linesFor(entry, name);
     if (lines.length === 0) continue;
+    const js = entry.cmd === "js" ? lines.join("\n") : null;
+    if (js !== null && js === lastJs) continue;
     lastOpenUrl = url;
+    lastJs = js;
     for (const line of lines) body.push(`  ${line}`);
   }
   return [
