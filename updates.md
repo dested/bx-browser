@@ -1,5 +1,11 @@
 # Updates
 
+## 2026-10-12 — Cut over to bx.exe on this machine
+G:\code\bx\dist first on the user PATH; the global bun link now points at G:\code\bx
+(was bx-live); skill reinstalled. Fixed a bx.exe cold-start hang (b3d35a7): the daemon
+inherited the caller's pipe. Cold 686-791 ms, warm 22-127 ms, parity 102/0.
+Touched: dotnet/bx/Program.cs, skill/SKILL.md
+
 ## 2026-10-12 — Audit implementation (41 items) + speed wave: recording V1, bx.exe
 Implemented the approved audit (per plans/2026-10-12-audit-implementation.md) and
 scout's speed research (plans/2026-10-12-speed-research.md). Identity refs, ranked
