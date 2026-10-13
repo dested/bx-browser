@@ -281,7 +281,9 @@ export const CmdSchema = z.discriminatedUnion("cmd", [
   z.object({
     cmd: z.literal("wheel"),
     deltaY: z.number(),
-    x: z.number().optional(), // move mouse here first; with `in`, element-relative
+    // move the mouse here first; with `in`, element-relative. `in` with
+    // neither x nor y scrolls that element into view (then wheels deltaY if ≠ 0).
+    x: z.number().optional(),
     y: z.number().optional(),
     in: TargetSchema.optional(),
     ...actionOpts,
@@ -489,10 +491,14 @@ export interface AgentRunOptions {
   maxTurns?: number;
   /** stream each tool call/result to stderr as it happens. CLI: --verbose. */
   verbose?: boolean;
-  /** allow a FINAL escalation sonnet → Opus 4.8. Opt-in only (CLI: --opus);
-   * for complex flows — ~5× Sonnet cost. Never escalates past the tier the
+  /** allow a FINAL escalation sonnet → Opus 5.5. Opt-in only (CLI: --opus);
+   * for complex flows — ~2× Sonnet cost. Never escalates past the tier the
    * user started at: --model opus runs Opus directly with no chain. */
   escalateOpus?: boolean;
+  /** bx_snap returns the screenshot itself (JPEG q70, ≤1024 wide, optional
+   * element crop) instead of a path. Off by default: images cost tokens.
+   * For canvas/game pages where the DOM has nothing to read. CLI: --vision. */
+  vision?: boolean;
   /** estimated-spend ceiling in USD across ALL rungs; the run aborts mid-rung
    * when the estimate crosses it and still emits a synthesized fail report.
    * Estimate = per-tier token pricing, cache reads billed at 10% of input.

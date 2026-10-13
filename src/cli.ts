@@ -137,8 +137,11 @@ Flows and automation
                                    [--save <name>] [--max-turns <n>] [--verbose]
                                    [--budget <usd>] [--max-wall <s>]
                                    [--url <u>] [--enter <js>] [--win <expr>]
-                                   --opus allows one final escalation to Opus 4.8
-                                   — complex flows only, ~5× Sonnet cost
+                                   [--vision]
+                                   --opus allows one final escalation to Opus 5.5
+                                   — complex flows only, ~2× Sonnet cost
+                                   --vision lets the model see screenshots
+                                   (canvas/game pages; costs image tokens)
                                    --budget/--max-wall abort the run at that
                                    estimated spend or elapsed time and still
                                    print a report
@@ -975,6 +978,7 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
       const maxWallMs = takeMaxWallMs(args);
       const verbose = takeFlag(args, "--verbose");
       const escalateOpus = takeFlag(args, "--opus");
+      const vision = takeFlag(args, "--vision");
       const startUrl = takeOption(args, "--url");
       const enterJs = takeOption(args, "--enter");
       const winExpr = takeOption(args, "--win");
@@ -988,7 +992,7 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
           'usage: bx agent "<instruction>" [--model haiku|sonnet|opus] [--opus]' +
             " [--save <name>] [--max-turns <n>] [--verbose]" +
             " [--budget <usd>] [--max-wall <s>]" +
-            " [--url <u>] [--enter <js>] [--win <expr>]",
+            " [--url <u>] [--enter <js>] [--win <expr>] [--vision]",
         );
       }
       const options: AgentRunOptions = {
@@ -999,6 +1003,7 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
         maxTurns,
         verbose,
         escalateOpus,
+        vision,
         budgetUsd,
         maxWallMs,
         startUrl,

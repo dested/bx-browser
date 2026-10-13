@@ -32,8 +32,8 @@ bx agent "log in as demo@acme.test and verify the invoice list loads" --save inv
   estimate). On aborted runs `est` includes the aborted rung's spend, which
   metered cost structurally cannot — so `est` is the number to trust when a run
   hit `--budget` or `--max-wall`.
-- `--opus` allows one FINAL escalation Sonnet → Opus 4.8. Complex flows only
-  (long multi-page journeys, gnarly canvas work) — ~5× Sonnet cost. Don't pass
+- `--opus` allows one FINAL escalation Sonnet → Opus 5.5. Complex flows only
+  (long multi-page journeys, gnarly canvas work) — ~2× Sonnet cost. Don't pass
   it by default; add it when a Sonnet attempt already failed on a task that
   genuinely needs the extra reasoning. `--model opus` runs Opus directly.
 - Typical real-app DOM task: 10–40 turns, 15–75s, $0.02–0.06. Measured 7/7
