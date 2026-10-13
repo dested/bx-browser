@@ -112,13 +112,15 @@ A file nobody owns: ask the lead before touching it.
 
 ## Ledger (lead, updated 2026-10-12)
 
-Board: down · Last pushed: b3dc301 (origin/main; local main a80f037 unpushed) · Gate: n/a
+Board: down · Last pushed: b3dc301 (origin/main; local main ahead, unpushed) · Gate: n/a
 
 | Agent | Model | Owns | Item now | Last sha / artifact | Status |
 | --- | --- | --- | --- | --- | --- |
-| scout | opus-xhigh | research report | Q1–Q3 | — | spawning |
-| core | opus-high | session.ts, daemon.ts, serialize.ts | wave 1 sample | — | waits on live relink |
+| scout | opus-xhigh | research report | Q1–Q3 | — | running |
+| core | opus-high | session.ts, daemon.ts, serialize.ts | wave 1 sample | — | running |
+| lead | — | cli, client, protocol, constants, script | R5 S2 S3 C7 A1-cli | aafd640 | done: CLI js 1 94→67 ms (bun floor 45), bx do 20 cmds 105 ms |
 
+Live tool: global bx → G:\codex-live (a80f037), relinked by Sal 2026-10-12.
 Background jobs: none
-Waiting on Sal: global bx relink to G:\code\bx-live
-Next: protocol.ts contract for wave 1, spawn scout
+Waiting on Sal: sample approval (after core reports)
+Next: review core's sample, then spawn resolver, agentkit, infra
