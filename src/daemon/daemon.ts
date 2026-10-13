@@ -9,6 +9,7 @@
 
 // Must stay first: patches child_process before Playwright spawns anything.
 import "./hideWindows.ts";
+import * as nodeModule from "node:module";
 import { randomBytes } from "node:crypto";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -35,6 +36,10 @@ import { Session, steps } from "./session.ts";
 import { harnessRoutes, recordStart, recordStop, recordingSlug } from "./record.ts";
 import { collectDebug, heapSnapshot, Journal, parseClientTag, runGc } from "./debug.ts";
 import { pruneSnaps, snapDays } from "./orphans.ts";
+
+// K2: cache V8 bytecode for modules loaded from here on (chiefly the lazy
+// playwright-core import, ~45 ms saved per cold start). Node 22.1+ only.
+if (typeof nodeModule.enableCompileCache === "function") nodeModule.enableCompileCache();
 
 const ERROR_CODES: readonly string[] = [
   "target_not_found",
@@ -468,6 +473,11 @@ await new Promise<void>((resolve) => {
   server.listen(0, "127.0.0.1", resolve);
 });
 
+// K2: overlap the costly cold-start work with the client's poll and first
+// POST. playwright-core takes ~230 ms to import (less once the compile cache
+// is warm); Session's own import() then finds it loaded.
+void import("playwright-core").catch(() => undefined);
+
 const address = server.address();
 const port = typeof address === "object" && address !== null ? address.port : 0;
 if (port === 0) throw new Error("http server did not report a port");
@@ -481,6 +491,7 @@ const run: RunFile = {
   startedAt: new Date().toISOString(),
 };
 await writeFile(runFile, JSON.stringify(run, null, 2));
+session.prewarm();
 
 process.on("SIGINT", () => {
   void shutdown("SIGINT");

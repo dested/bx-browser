@@ -743,6 +743,15 @@ export class Session {
   // Browser lifecycle
   // -------------------------------------------------------------------------
 
+  /**
+   * K2: start the browser while the client is still polling for the run file
+   * and posting its first command. A failed launch is left for that command,
+   * which launches again and reports the error.
+   */
+  prewarm(): void {
+    this.ensureContext().catch(() => undefined);
+  }
+
   private async ensureContext(): Promise<BrowserContext> {
     if (this.context) return this.context;
     step(this.dead ? "relaunch browser" : "launch browser");
