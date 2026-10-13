@@ -38,12 +38,22 @@ function oneLine(s: string, cap = SUMMARY_CAP): string {
 }
 
 function targetText(t: Target): string {
-  if ("ref" in t) return `[${t.ref}]`;
+  if ("ref" in t) return `@${t.ref}`;
   if ("text" in t) return `"${t.text}"`;
   if ("testid" in t) return `testid:${t.testid}`;
   if ("label" in t) return `label:${t.label}`;
   if ("role" in t) return t.name === undefined ? `role:${t.role}` : `role:${t.role}:${t.name}`;
   return t.selector;
+}
+
+function waitText(cmd: Extract<Cmd, { cmd: "wait" }>): string {
+  if (cmd.text !== undefined) return `"${cmd.text}"`;
+  if (cmd.selector !== undefined) return cmd.selector;
+  if (cmd.idle) return "idle";
+  if (cmd.gone !== undefined) return `gone ${targetText(cmd.gone)}`;
+  if (cmd.url !== undefined) return `url ${cmd.url}`;
+  if (cmd.js !== undefined) return `js ${cmd.js}`;
+  return `${cmd.ms ?? 0}ms`;
 }
 
 /** One line per command for a monitor. Typed values (fill, select) never appear. */
@@ -60,11 +70,11 @@ export function summarizeCmd(cmd: Cmd): string {
     case "press":
       return oneLine(`press ${cmd.key}`);
     case "wait":
-      return oneLine(`wait ${cmd.text !== undefined ? `"${cmd.text}"` : (cmd.selector ?? `${cmd.ms ?? 0}ms`)}`);
+      return oneLine(`wait ${waitText(cmd)}`);
     case "expect":
       return oneLine(`expect ${cmd.kind} "${cmd.value}"`);
     case "els":
-      return oneLine(`els${cmd.all ? " --all" : ""}${cmd.filter ? ` ${cmd.filter}` : ""}`);
+      return oneLine(`els${cmd.all ? " --all" : ""}${cmd.diff ? " --diff" : ""}${cmd.filter ? ` ${cmd.filter}` : ""}`);
     case "js":
       return oneLine(`js ${cmd.expression}`);
     case "drive":
@@ -87,6 +97,8 @@ export function summarizeCmd(cmd: Cmd): string {
       return `record start ${cmd.slug}`;
     case "recordStop":
       return "record stop";
+    case "netBody":
+      return `net body ${cmd.id}`;
     default:
       return cmd.cmd;
   }
@@ -199,12 +211,19 @@ export interface DebugContext {
   idleLimitMs: number;
 }
 
-export async function collectDebug(ctx: DebugContext): Promise<DebugResult> {
+/**
+ * light (`/debug?light=1`, D4): skip the per-page CDP sessions and
+ * Performance.getMetrics; pages come back with `metrics: null`. For monitors
+ * that only count pages (sal-widgets).
+ */
+export async function collectDebug(ctx: DebugContext, opts: { light?: boolean } = {}): Promise<DebugResult> {
   const mem = process.memoryUsage();
   const cpu = process.cpuUsage();
   const loop = { mean: nsToMs(loopDelay.mean), p99: nsToMs(loopDelay.percentile(99)), max: nsToMs(loopDelay.max) };
   loopDelay.reset();
-  const { pages, internals } = await ctx.session.debugInfo();
+  const readPages: (o: { light: boolean }) => Promise<Pick<DebugResult, "pages" | "internals">> =
+    ctx.session.debugInfo.bind(ctx.session);
+  const { pages, internals } = await readPages({ light: opts.light === true });
   return {
     v: DEBUG_VERSION,
     profile: ctx.profile,
