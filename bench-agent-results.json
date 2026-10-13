@@ -6,7 +6,7 @@
     "sonnet": "claude-sonnet-5-5",
     "opus": "claude-opus-5-5"
   },
-  "commit": "unknown",
+  "commit": "2e42e9d",
   "profile": "agentkit-bench",
   "headless": true,
   "tasks": [
