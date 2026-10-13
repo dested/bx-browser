@@ -240,7 +240,13 @@ async function measureFlowReplay(fixtureBase: string): Promise<BenchResults["flo
         seen++;
       },
     });
-    const [ms] = await timed(() => steps(ctx));
+    // Each FlowContext opens its own tab; closing it is outside the timed span.
+    let ms: number;
+    try {
+      [ms] = await timed(() => steps(ctx));
+    } finally {
+      await ctx.close();
+    }
     durations.push(ms);
     stepCount = seen;
   }
