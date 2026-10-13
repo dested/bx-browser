@@ -1,5 +1,15 @@
 # Updates
 
+## 2026-10-12 — Audit implementation (41 items) + speed wave: recording V1, bx.exe
+Implemented the approved audit (per plans/2026-10-12-audit-implementation.md) and
+scout's speed research (plans/2026-10-12-speed-research.md). Identity refs, ranked
+target resolution, adaptive settle, action deltas, deadlines, self-heal, active tab
+by identity, doctor/gc, agent escalation + pricing. Wave 3: click fast path
+(33→4 ms), cold start 789→684 ms, recording as a CDP screencast (start ~150 ms,
+stop ~120 ms, ring/save, marks, follow, mp4, background distill on a hidden page),
+NativeAOT bx.exe front door (~25 ms/call vs ~75, 102/102 parity), site update.
+Touched: src/**, dotnet/bx/**, scripts/build-frontdoor.ts, tests/**, site/**, skill/SKILL.md, cliffnotes.md, decisions.md, verify.md
+
 ## 2026-10-08 — Cap the daemon's action log
 Asked to cap the action log, which grew for a daemon's whole life. Now
 `daemon/actionLog.ts` keeps the newest 1000 entries and trims in chunks of 200.

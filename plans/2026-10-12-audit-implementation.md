@@ -1,11 +1,11 @@
 # bx audit implementation
 
 - **Date:** 2026-10-12
-- **Status:** active
+- **Status:** done
 - **Type:** plan
 - **What:** bosun run implementing the 41 approved audit items, plus research on Chrome speed, .NET and a recording redesign
 
-Status: active (2026-10-12). Lead: Opus. Agents: scout (opus-xhigh), core (opus-high); later resolver, agentkit, infra (opus-high). Board: down
+Status: done (2026-10-12). Lead: Opus. Agents: scout (opus-xhigh), core (opus-high); later resolver, agentkit, infra (opus-high). Board: down
 
 Sal, 2026-10-12 (verbatim, abridged only by cutting):
 - "Approved (41)" — every item in the audit artifact https://claude.ai/artifact/CKNcQXRXc77WSYXk757LeU
@@ -291,7 +291,7 @@ cli.ts and client.ts move from the lead to frontdoor for this wave. Anyone else'
 
 ## Ledger (lead, updated 2026-10-12, wave 3)
 
-Board: down · Last pushed: 9e79300 (gate 97/97; bx-live stays on 2e42e9d until recording V1 is whole) · bx-live refreshed from 2e42e9d · `bx doctor --fix` 17 fixed, `bx gc --yes` 168 profiles / 12.70 GB
+Board: down · Last pushed: 9fafef6 (gate 123 pass / 8 skip / 0 fail, site build 0) · bx-live retired: Sal relinks the global to G:/code/bx
 
 | Agent | Model | Owns | Item now | Last sha / artifact | Status |
 | --- | --- | --- | --- | --- | --- |
