@@ -2,9 +2,11 @@
 // bx tools, so the expensive model that called `bx do` never has to.
 //
 // Cost control is the whole point. Haiku runs first with a tight tool surface
-// and no filesystem/bash access; only if it fails to report a pass do we spend
-// Sonnet on the same instruction, once. Opus sits one rung further up and is
-// never reached unless the caller asked for it.
+// and no filesystem/bash access. A rung escalates to Sonnet only on a
+// capability failure — the model reported fail, or stall detection caught it
+// repeating itself — never because a budget or wall-clock cap ran out (a
+// rescue costs as much again and almost never lands). Opus sits one rung
+// further up and is never reached unless the caller asked for it.
 
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -15,6 +17,7 @@ import type { Options, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 
 import { cmd } from "../client.ts";
 import { synthesizeFlow } from "../flows/synthesize.ts";
+import { MODEL_IDS, costUsd, isLongPrompt, promptTokens, type Tokens } from "./pricing.ts";
 import { BX_SERVER_NAME, BX_TOOL_NAMES, createBxTools, type ToolSink } from "./tools.ts";
 import { BX_DIR_NAME } from "../protocol.ts";
 import type {
@@ -25,41 +28,30 @@ import type {
   AgentUsage,
 } from "../protocol.ts";
 
-const MODEL_IDS: Record<AgentModel, string> = {
-  haiku: "claude-haiku-4-5",
-  sonnet: "claude-sonnet-5",
-  opus: "claude-opus-4-8",
-};
-
 const MAX_TURNS = 40;
-
-// USD per million tokens, per tier. Only used for mid-run governance — the
-// trailer still prefers the SDK's own cost when it reports one.
-const PRICING: Record<AgentModel, { input: number; output: number }> = {
-  haiku: { input: 1, output: 5 },
-  sonnet: { input: 3, output: 15 },
-  opus: { input: 5, output: 25 },
-};
-const CACHE_READ_RATE = 0.1; // cache reads bill at a tenth of the input rate
-const CACHE_WRITE_RATE = 1.25; // cache writes bill at 125% of the input rate
 
 const AGENT_RUNS_DIR = "agent-runs"; // ~/.bx/agent-runs/<ts>.jsonl
 const TOOL_RESULT_MAX_CHARS = 2000;
 const VERBOSE_LINE_MAX_CHARS = 160;
 const EXHAUSTION_EVIDENCE = 8; // action-log entries attached to a synthesized report
-const ESCALATION_ACTIONS = 5; // prior-attempt actions handed to the bigger model
+const ESCALATION_LOG_CHARS = 3000; // prior attempt's action log handed up, newest kept
 const STALL_WINDOW = 8; // tool calls examined for repetition
 const STALL_DISTINCT = 3; // at or below this many distinct calls in the window = stuck
 const STALL_EVIDENCE = 4; // distinct repeated calls named in the stall report
 const HEARTBEAT_TURNS = 10;
 const HEARTBEAT_INPUT_MAX_CHARS = 48;
 
-const SYSTEM = `You are bx-driver, operating a real browser through bx tools. You cannot see the screen; you see distilled text. Work fast and precisely.
-Method: (1) bx_open the target URL, or bx_els to see the current page. (2) Element lists show numbered refs like [3] button "Save" — act on them by passing the number as target, or pass visible text / a data-testid. (3) After any action that changes the page, the result tells you; call bx_els again only when you need fresh refs. (4) Verify every task outcome with bx_expect before reporting. (5) If a target is not found, read the 'did you mean' candidates and retry once with the best one. (6) Check bx_console if something seems broken.
+const SYSTEM = `You are bx-driver, operating a real browser through bx tools. You cannot see the screen; you see distilled text. Work fast and precisely: every turn costs time and money, so make each call do as much as it can.
+Method: (1) bx_open the target URL, or bx_els to see the current page. (2) Element lists show numbered refs like [3] button "Save" — act on them by passing the number as target, or pass visible text / a data-testid. A ref stays valid until its element leaves the page, so reuse refs you already have. (3) Every action result says what changed: new URL, dialog opened/closed, alerts, focus, new tab, DOM growth. When an action will open a view you need to act in next, pass then:"els" to get the new element list in the same call instead of a separate bx_els. (4) bx_els after your first scan returns only what changed. (5) To wait, name the condition with bx_wait (text, gone, url, js, idle) — it returns the moment it holds; never sleep and re-check. (6) Verify every task outcome with bx_expect before reporting. (7) If a target is not found, read the 'did you mean' candidates and retry once with the best one; if it is ambiguous, pass the ref of the one you mean. (8) bx_console shows this tab's errors.
+Long or lazy lists: bx_scroll (deltaY, or a target to bring into view), then bx_els. Popups and new tabs: an action reports "opened new tab N"; bx_tabs switch N to work there, bx_tabs close N when done. Your only tools are the bx_* tools listed — there is no bash, js, wait or bx_snapshot tool: use bx_js, bx_wait, bx_els/bx_text.
 Canvas/games: when the page is a canvas with no useful elements, act by coordinates — bx_mouse/bx_drag/bx_key with in set to the canvas testid so x/y are relative to its top-left; hold movement keys with bx_key down then up. You cannot see the canvas: read state the app exposes via bx_js (e.g. window.__game) and verify outcomes with bx_js too — bx_expect only sees DOM text.
 Finding targets on a canvas: you cannot see it, so never guess pixel positions for an unlabeled target. First map the app's exposed handles — bx_js Object.keys(window).filter(k => k.startsWith('__')) — then explore the promising one (Object.keys, .getState?.()). Prefer calling an app navigation/store action or opening a deep-link URL via bx_js over blind coordinate clicks; coordinates are for targets whose position you actually know from the task, from state, or from element-relative geometry.
 Real-time games: turn-based per-key play CANNOT win a 60fps game — by the time you read state and press a key the game has moved on. Use bx_drive: (1) find the app's per-frame input hook in its exposed state; (2) dump ONE sample of the full input shape it accepts — buttons AND axes, a joystick-only controller cannot win a game whose jump/flap is a button, and buttons may be edge-triggered: if holding one has no effect, pulse it every few frames; (3) infer roles from instance counts (1-of = hero, N-of = collectibles or hazards); (4) bx_drive installs your controller and polls the win signal entirely in-page, zero turns while it plays; (5) on timeout, revise the controller and call bx_drive again — it replaces the old one without restarting the game.
 Rules: never invent selectors; prefer testids and visible text. Keep to the task — do not explore. When the task is done (or truly impossible), call bx_report exactly once with status, a 2–3 sentence summary, and evidence (assertions passed, final URL). Then stop.`;
+
+// --vision only: the one place the model is told it can look.
+const VISION_NOTE = `
+Vision: bx_snap returns the screenshot itself (optionally cropped to a target). Use it where the DOM cannot tell you what is on screen — canvas, games, charts. It costs far more than text, so on ordinary pages prefer bx_els and bx_text.`;
 
 type Report = { status: "pass" | "fail"; summary: string; evidence: string[] };
 
@@ -70,19 +62,20 @@ interface Attempt {
   report: Report | null;
   turns: number;
   usage: AgentUsage;
-  /** What this attempt actually did, from the daemon action log. */
+  /** What this attempt actually did, from the daemon action log, oldest first. */
   actions: string[];
   endedBy: EndedBy;
   /** Last page URL this attempt reached; the next rung starts there. */
   lastUrl?: string;
-  /** Tab this attempt drove; what scopes the shared action log back to it. */
-  tabId?: number;
+  /** Tabs this attempt drove; what scopes the shared action log back to it. */
+  tabIds: number[];
 }
 
 /** What an escalation is told about the attempt it is replacing. */
 interface Prior {
   summary: string;
-  actions: string[];
+  /** The prior rung's whole action log, newest kept within ESCALATION_LOG_CHARS. */
+  log: string;
   lastUrl?: string;
 }
 
@@ -99,16 +92,19 @@ interface RunState {
 }
 
 type AssistantUsage = Extract<SDKMessage, { type: "assistant" }>["message"]["usage"];
+type ResultUsage = Extract<SDKMessage, { type: "result" }>["usage"];
 
-function messageCostUsd(tier: AgentModel, usage: AssistantUsage): number {
-  const price = PRICING[tier];
-  const cacheRead = usage.cache_read_input_tokens ?? 0;
-  const cacheCreate = usage.cache_creation_input_tokens ?? 0;
-  const input =
-    usage.input_tokens * price.input +
-    cacheRead * price.input * CACHE_READ_RATE +
-    cacheCreate * price.input * CACHE_WRITE_RATE;
-  return (input + usage.output_tokens * price.output) / 1_000_000;
+/** Token counts in pricing.ts terms. A write with no ttl breakdown counts as 5-minute. */
+function tokensOf(u: AssistantUsage | ResultUsage): Tokens {
+  const write = u.cache_creation_input_tokens ?? 0;
+  const oneHour = u.cache_creation?.ephemeral_1h_input_tokens ?? 0;
+  return {
+    input: u.input_tokens,
+    output: u.output_tokens,
+    cacheRead: u.cache_read_input_tokens ?? 0,
+    cacheWrite5m: Math.max(0, write - oneHour),
+    cacheWrite1h: oneHour,
+  };
 }
 
 interface Ceiling {
@@ -213,7 +209,10 @@ function toolResultEvents(content: UserMessageContent): TranscriptEvent[] {
     if (typeof block.content === "string") {
       parts.push(block.content);
     } else if (Array.isArray(block.content)) {
-      for (const inner of block.content) if (inner.type === "text") parts.push(inner.text);
+      for (const inner of block.content) {
+        if (inner.type === "text") parts.push(inner.text);
+        else if (inner.type === "image") parts.push("[image]");
+      }
     }
     events.push({
       kind: "tool_result",
@@ -234,22 +233,38 @@ async function actionLogNextIndex(profile: string): Promise<number> {
   }
 }
 
-/** `tab` keeps a concurrent run's actions out of this one's evidence. */
+/** `tabs` keeps a concurrent run's actions out of this one's evidence. Oldest first. */
 async function actionsSince(
   profile: string,
   sinceIndex: number,
-  max: number,
-  tab: number | undefined,
+  tabs: readonly number[],
 ): Promise<string[]> {
   try {
     const res = await cmd<ActionLogResult>(profile, { cmd: "actionLog", sinceIndex });
     if (!res.ok) return [];
+    const mine = new Set(tabs);
     const entries =
-      tab === undefined ? res.data.entries : res.data.entries.filter((e) => e.tab === tab);
-    return entries.slice(-max).map((e) => e.text);
+      mine.size === 0
+        ? res.data.entries
+        : res.data.entries.filter((e) => e.tab !== undefined && mine.has(e.tab));
+    return entries.map((e) => e.text);
   } catch {
     return [];
   }
+}
+
+/** The newest actions that fit in `max` chars, oldest first, with a marker when older ones were cut. */
+function tailLog(actions: readonly string[], max: number): string {
+  const kept: string[] = [];
+  let used = 0;
+  for (let i = actions.length - 1; i >= 0; i--) {
+    const line = actions[i];
+    if (line === undefined || used + line.length + 1 > max) break;
+    kept.unshift(line);
+    used += line.length + 1;
+  }
+  const cut = actions.length - kept.length;
+  return [...(cut > 0 ? [`(${cut} earlier actions omitted)`] : []), ...kept].join("\n");
 }
 
 // JSON forms a truthy win predicate can never take. A pass whose predicate
@@ -293,19 +308,12 @@ async function runAttempt(
 
   // Each attempt drives its own tab, so an escalation starts in a fresh page
   // and two concurrent runs never share one. Handing that tab the URL the last
-  // rung reached is what makes the "orient yourself" instruction below true.
-  const tools = createBxTools(opts.profile, sink, prior?.lastUrl ?? opts.startUrl);
+  // rung reached is what makes the "continue from here" instruction true.
+  const tools = createBxTools(opts.profile, sink, {
+    startUrl: prior?.lastUrl ?? opts.startUrl,
+    vision: opts.vision,
+  });
 
-  // An escalation that only knows the prior summary re-runs the same failure at
-  // a higher price; the actions tell it where the cheap model actually got to.
-  const priorActions =
-    prior === null || prior.actions.length === 0
-      ? ""
-      : ` Its last actions: ${prior.actions.join("; ")}.`;
-  const orient =
-    prior?.lastUrl === undefined
-      ? "The browser is in whatever state it left. Start by calling bx_els to orient, then complete the task."
-      : `You start in a fresh tab already open at ${prior.lastUrl} (where the previous attempt ended). Call bx_els to orient, then continue.`;
   // The entry recipe runs per rung, not per run: an escalation gets a fresh tab
   // and no in-page state survives that.
   let setup = "";
@@ -319,10 +327,24 @@ async function runAttempt(
     opts.winExpr === undefined
       ? ""
       : ` The task's success predicate: bx_js \`${opts.winExpr}\` must be truthy. Poll it; report pass only once it is truthy.`;
-  const base =
-    prior === null
-      ? opts.instruction
-      : `A previous attempt by a smaller model did not complete this task (its last report: ${prior.summary}).${priorActions} ${orient}\n\n${opts.instruction}`;
+
+  // An escalation that only knows the prior summary re-runs the same failure at
+  // a higher price. It gets the whole story instead: everything the smaller
+  // model did, and the page as it stands now (scanned after setup, so the refs
+  // are live and the model's first bx_els is already a diff).
+  let base = opts.instruction;
+  if (prior !== null) {
+    const where =
+      prior.lastUrl === undefined
+        ? "Your tab is fresh."
+        : `Your tab is a fresh one, already open at ${prior.lastUrl} (where that attempt ended).`;
+    const log = prior.log.length === 0 ? "(it took no browser actions)" : prior.log;
+    const els = await tools.scan();
+    base =
+      `A previous attempt by a smaller model did not complete this task. Its final report: ${prior.summary}\n` +
+      `Everything it did, in order:\n${log}\n\n${where} Elements there now:\n${els}\n\n` +
+      `Do not repeat what failed. Task:\n${opts.instruction}`;
+  }
   const prompt = `${setup}${base}${win}`;
 
   const maxTurns = opts.maxTurns ?? MAX_TURNS;
@@ -344,7 +366,7 @@ async function runAttempt(
     allowedTools: BX_TOOL_NAMES,
     permissionMode: "bypassPermissions",
     maxTurns,
-    systemPrompt: SYSTEM,
+    systemPrompt: opts.vision === true ? `${SYSTEM}${VISION_NOTE}` : SYSTEM,
     // Isolation: the driver must not inherit the user's CLAUDE.md, settings, or
     // MCP servers — they would bloat a cheap model's context and change results
     // between machines.
@@ -352,8 +374,13 @@ async function runAttempt(
   };
 
   let turns = 0;
-  // Every completed rung re-anchors the ladder-wide estimate to metered truth,
-  // so per-message pricing drift cannot compound across escalations.
+  // The SDK emits one assistant message per content block, each repeating the
+  // request's usage, and that usage is a snapshot taken before the output was
+  // written. So a turn is a distinct message id, the running estimate prices
+  // each request once, and the rung's final result re-anchors the estimate to
+  // its metered token totals (priced by pricing.ts, not by the SDK's table).
+  const seen = new Set<string>();
+  let longPrompt = false; // any request in this rung past the tier's long-prompt line
   const rungBase = run.estUsd;
   let usage: AgentUsage = { ...ZERO_USAGE };
   let failure: string | null = null;
@@ -385,9 +412,14 @@ async function runAttempt(
   try {
     for await (const message of query({ prompt, options })) {
       if (message.type === "assistant") {
-        turns += 1;
-        run.turns += 1;
-        run.estUsd += messageCostUsd(tier, message.message.usage);
+        if (!seen.has(message.message.id)) {
+          seen.add(message.message.id);
+          turns += 1;
+          run.turns += 1;
+          const t = tokensOf(message.message.usage);
+          longPrompt ||= isLongPrompt(tier, promptTokens(t));
+          run.estUsd += costUsd(tier, t);
+        }
         for (const block of message.message.content) {
           if (block.type === "text") {
             if (block.text.trim().length === 0) continue;
@@ -418,9 +450,7 @@ async function runAttempt(
           cacheReadTokens: message.usage.cache_read_input_tokens,
           costUsd: message.total_cost_usd,
         };
-        if (typeof message.total_cost_usd === "number") {
-          run.estUsd = rungBase + message.total_cost_usd;
-        }
+        run.estUsd = rungBase + costUsd(tier, tokensOf(message.usage), longPrompt);
       }
 
       // A model that has already reported is one message from stopping on its
@@ -473,7 +503,9 @@ async function runAttempt(
     await tools.close().catch(() => undefined);
   }
 
-  const actions = await actionsSince(opts.profile, startIndex, EXHAUSTION_EVIDENCE, tools.tabId());
+  const tabIds = tools.tabIds();
+  const actions = await actionsSince(opts.profile, startIndex, tabIds);
+  const evidence = actions.slice(-EXHAUSTION_EVIDENCE);
 
   // An attempt that ends without calling bx_report is the black box this whole
   // file exists to avoid: synthesize the report the model owed us, with what it
@@ -487,7 +519,7 @@ async function runAttempt(
     box.report = {
       status: "fail",
       summary: stopped.summary,
-      evidence: [...stopped.extra, ...actions],
+      evidence: [...stopped.extra, ...evidence],
     };
   } else {
     const exhausted = failure === null || /maximum number of turns/i.test(failure);
@@ -497,7 +529,7 @@ async function runAttempt(
       summary: exhausted
         ? `ran out of turns (${maxTurns}) without reporting — see transcript`
         : `agent run errored: ${failure}`,
-      evidence: actions,
+      evidence,
     };
   }
 
@@ -509,7 +541,7 @@ async function runAttempt(
     actions,
     endedBy,
     lastUrl: tools.lastUrl(),
-    tabId: tools.tabId(),
+    tabIds,
   };
 }
 
@@ -546,6 +578,7 @@ async function appendRunLog(
   opts: AgentRunOptions,
   report: AgentReport,
   estUsd: number,
+  via: string | undefined,
 ): Promise<void> {
   try {
     const dir = path.join(homedir(), BX_DIR_NAME);
@@ -554,6 +587,8 @@ async function appendRunLog(
       ts: new Date().toISOString(),
       instruction: opts.instruction,
       tier: report.tier,
+      modelId: MODEL_IDS[report.tier],
+      ...(via === undefined ? {} : { via }),
       escalated: report.escalated,
       status: report.status,
       endedBy: report.endedBy,
@@ -568,7 +603,27 @@ async function appendRunLog(
   }
 }
 
-export async function runAgent(opts: AgentRunOptions): Promise<AgentReport> {
+/** Knobs for callers inside bx (the bench), not part of the CLI surface. */
+export interface RunControl {
+  /** false: run the starting tier alone, no escalation. Default true. */
+  escalate?: boolean;
+  /** Tags the agent-log line, so bench runs don't read as real usage. */
+  via?: string;
+}
+
+/**
+ * Whether a finished rung earns a bigger model. Only a capability failure
+ * does: the model said it failed, or it was caught going in circles. A rung
+ * cut off by the budget or the clock, out of turns, or crashed is not one a
+ * smarter model is likely to rescue — in the agent log, escalations after
+ * those cost half of all spend for 6 passes in 93.
+ */
+function earnsEscalation(a: Attempt): boolean {
+  if (a.endedBy === "stall") return true;
+  return a.endedBy === "report" && a.report?.status === "fail";
+}
+
+export async function runAgent(opts: AgentRunOptions, control: RunControl = {}): Promise<AgentReport> {
   const started = Date.now();
   const run: RunState = { started, estUsd: 0, turns: 0 };
 
@@ -584,21 +639,23 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentReport> {
   let attempt = await runAttempt(opts, opts.model, null, transcript, run);
   attempts.push(attempt);
 
-  // The ladder above the starting tier: haiku always gets one Sonnet retry,
-  // and Opus is only ever reached when the caller opted in. Built from the
-  // starting tier so a run never escalates past where the caller began.
+  // The ladder above the starting tier: haiku gets one Sonnet retry, and Opus
+  // is only ever reached when the caller opted in. Built from the starting
+  // tier so a run never escalates past where the caller began.
   const ladder: AgentModel[] = [];
-  if (opts.model === "haiku") ladder.push("sonnet");
-  if (opts.escalateOpus === true && opts.model !== "opus") ladder.push("opus");
+  if (control.escalate !== false) {
+    if (opts.model === "haiku") ladder.push("sonnet");
+    if (opts.escalateOpus === true && opts.model !== "opus") ladder.push("opus");
+  }
 
   for (const tier of ladder) {
-    if (attempt.report?.status === "pass") break;
+    if (!earnsEscalation(attempt)) break;
     // A ceiling ends the run, not just the rung: escalating past a spend or
     // wall limit is exactly the runaway the limit exists to prevent.
     if (ceilingHit(opts, run) !== null) break;
     const prior: Prior = {
       summary: attempt.report?.summary ?? "none",
-      actions: attempt.actions.slice(-ESCALATION_ACTIONS),
+      log: tailLog(attempt.actions, ESCALATION_LOG_CHARS),
       lastUrl: attempt.lastUrl,
     };
     attempt = await runAttempt(opts, tier, prior, transcript, run);
@@ -627,12 +684,10 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentReport> {
   };
 
   if (opts.save !== undefined && report.status === "pass") {
-    const tabIds = new Set(
-      attempts.map((a) => a.tabId).filter((id): id is number => id !== undefined),
-    );
+    const tabIds = new Set(attempts.flatMap((a) => a.tabIds));
     report.savedFlow = await saveFlow(opts, opts.save, startIndex, tabIds);
   }
 
-  await appendRunLog(opts, report, run.estUsd);
+  await appendRunLog(opts, report, run.estUsd, control.via);
   return report;
 }
