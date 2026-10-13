@@ -287,6 +287,7 @@ cli.ts and client.ts move from the lead to frontdoor for this wave. Anyone else'
 - (2026-10-12, lead) Wave 3 ownership: cli.ts, client.ts, script.ts and their tests move to frontdoor; record.ts and harness to recorder. CLI lines from anyone else go to the lead as exact text, forwarded to frontdoor. Applies to: all.
 - (2026-10-12, lead) The V1 recording protocol (scratchpad\lead\protocol-v1.diff) lands in protocol.ts only in the same push as recorder's first record.ts commit, since record.ts fails tsc against it. recorder builds against a local copy of the diff and says "protocol-v1 now <sha>". Applies to: recorder, lead.
 - (2026-10-12, lead) bx.exe goes to G:\codex\distx.exe (gitignored); nothing touches PATH or the global bx link this wave. Applies to: frontdoor.
+- (2026-10-12, Sal) NO VISIBLE WINDOWS, ever: terminal windows popped up on Sal's screen at ~22:22. Every spawn uses windowsHide: true (Node/Bun) or UseShellExecute=false + CreateNoWindow=true (.NET), stdio piped or ignored; never `shell: true`, `start`, `cmd /c`. Every dotnet call adds `-nodeReuse:false -p:UseSharedCompilation=false --disable-build-servers`. Every agent bx daemon runs --headless. Applies to: all.
 
 ## Ledger (lead, updated 2026-10-12, wave 3)
 
