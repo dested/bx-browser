@@ -20,6 +20,9 @@ function q(s: string): string {
 function textOf(target: Target): string {
   if ("text" in target) return target.text;
   if ("selector" in target) return target.selector;
+  if ("testid" in target) return target.testid;
+  if ("label" in target) return target.label;
+  if ("role" in target) return target.name ?? target.role;
   return String(target.ref);
 }
 

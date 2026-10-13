@@ -40,6 +40,9 @@ function oneLine(s: string, cap = SUMMARY_CAP): string {
 function targetText(t: Target): string {
   if ("ref" in t) return `[${t.ref}]`;
   if ("text" in t) return `"${t.text}"`;
+  if ("testid" in t) return `testid:${t.testid}`;
+  if ("label" in t) return `label:${t.label}`;
+  if ("role" in t) return t.name === undefined ? `role:${t.role}` : `role:${t.role}:${t.name}`;
   return t.selector;
 }
 

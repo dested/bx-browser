@@ -33,21 +33,35 @@ export {
 } from "./constants.ts";
 
 // ---------------------------------------------------------------------------
-// Targets. CLI parsing rule: /^\d+$/ → ref; starts with '#', '.', '[', '//',
-// 'css=', 'xpath=' → selector; otherwise → text.
-// Text resolution order (first match wins, must be visible):
-//   1. [data-testid="<text>"]
-//   2. getByRole('button'|'link'|'tab'|'menuitem'|'checkbox'|'radio', {name, exact:false})
-//   3. getByLabel(text)  4. getByPlaceholder(text)
-//   5. getByText(text, {exact:true})  6. getByText(text) first visible match
+// Targets. CLI parsing: `@12` → ref; bare digits → {ref, orText}; prefixes
+// `text:`, `testid:`, `label:`, `role:<role>[:<name>]` → that variant; starts
+// with '#', '.', '[', '//', 'css=', 'xpath=' → selector; otherwise → text.
+// `--exact` sets exact, `--first` sets first on the parsed target.
+//
+// Resolution (src/daemon/resolve.ts) scores every visible candidate in one
+// in-page pass: exact accessible name > exact text > prefix > substring;
+// inside an open dialog or the viewport beats elsewhere; hidden elements never
+// match. exact:true drops prefix/substring matches. A tie at the top score is
+// `ambiguous` (nearMatches lists the tied candidates as refs) unless first:true,
+// which takes the first in document order. Text candidates: test ids, roles
+// (button, link, tab, menuitem, checkbox, radio, option, switch, combobox),
+// labels, placeholders, then any element's own text.
 // ---------------------------------------------------------------------------
+
+const matchOpts = {
+  exact: z.boolean().optional(),
+  first: z.boolean().optional(),
+};
 
 export const TargetSchema = z.union([
   // orText: the CLI sends bare digits ("2") as {ref: 2, orText: "2"} — the
   // daemon uses the ref only when it exists in the page's current registry,
   // otherwise resolves orText as a text target. `@2` is always a ref.
   z.object({ ref: z.number().int().positive(), orText: z.string().min(1).optional() }),
-  z.object({ text: z.string().min(1) }),
+  z.object({ testid: z.string().min(1), ...matchOpts }),
+  z.object({ role: z.string().min(1), name: z.string().optional(), ...matchOpts }),
+  z.object({ label: z.string().min(1), ...matchOpts }),
+  z.object({ text: z.string().min(1), ...matchOpts }),
   z.object({ selector: z.string().min(1) }),
 ]);
 export type Target = z.infer<typeof TargetSchema>;
@@ -61,6 +75,8 @@ export interface El {
   state: string[]; // subset of: disabled, checked, selected, expanded, focused
   testid?: string; // data-testid when present
   id?: string; // element id when present
+  frame?: string; // set for elements inside a same-origin iframe: the frame's name or src
+  dialog?: boolean; // inside the open modal/dialog (listed first)
 }
 
 // Ref registry entry stored daemon-side. generation increments on every els
@@ -110,7 +126,15 @@ const tabPin = { tab: z.number().int().nonnegative().optional() };
 // Adaptive settle for actions: after the action the daemon waits until the DOM
 // and the action's network requests are quiet for 50 ms, capped at `settle` ms
 // (default 1500; 0 skips settling). ActionResult.settledMs reports the wait.
-const actionOpts = { settle: z.number().int().nonnegative().optional() };
+//
+// then: append an observation to the same result (ActionResult.then).
+// until: after settling, wait for this text to be visible (timeoutMs applies);
+// the action fails with `timeout` when it never shows.
+const actionOpts = {
+  settle: z.number().int().nonnegative().optional(),
+  then: z.enum(["els", "text", "snap"]).optional(),
+  until: z.string().min(1).optional(),
+};
 
 export const CmdSchema = z.discriminatedUnion("cmd", [
   z.object({ cmd: z.literal("open"), url: z.string(), ...tabPin }),
@@ -118,6 +142,8 @@ export const CmdSchema = z.discriminatedUnion("cmd", [
     cmd: z.literal("els"),
     all: z.boolean().optional(),
     filter: z.string().optional(),
+    diff: z.boolean().optional(), // only what changed since this tab's last scan (ElsResult.diff)
+    clickables: z.boolean().optional(), // also list cursor:pointer elements with no role
     ...tabPin,
   }),
   z.object({
@@ -150,6 +176,10 @@ export const CmdSchema = z.discriminatedUnion("cmd", [
     text: z.string().optional(), // wait until text visible
     selector: z.string().optional(), // wait until selector visible
     ms: z.number().optional(), // plain sleep
+    idle: z.boolean().optional(), // network and DOM quiet for 500 ms
+    gone: TargetSchema.optional(), // wait until this target is no longer visible
+    url: z.string().optional(), // wait until the URL contains this
+    js: z.string().optional(), // wait until this expression is truthy
     timeoutMs: z.number().optional(),
     ...tabPin,
   }),
@@ -164,19 +194,38 @@ export const CmdSchema = z.discriminatedUnion("cmd", [
     cmd: z.literal("snap"),
     path: z.string().optional(),
     full: z.boolean().optional(),
+    target: TargetSchema.optional(), // crop to this element
+    jpeg: z.boolean().optional(),
+    quality: z.number().int().min(1).max(100).optional(), // jpeg only, default 80
+    stable: z.boolean().optional(), // wait until two consecutive frames match (cap 3 s)
     ...tabPin,
   }),
-  z.object({ cmd: z.literal("text"), selector: z.string().optional(), ...tabPin }),
+  z.object({
+    cmd: z.literal("text"),
+    selector: z.string().optional(), // legacy; target wins when both are set
+    target: TargetSchema.optional(), // no target: main/[role=main] if present, else body
+    md: z.boolean().optional(), // headings, lists and links as compact markdown
+    timeoutMs: z.number().optional(),
+    ...tabPin,
+  }),
   z.object({
     cmd: z.literal("console"),
     all: z.boolean().optional(), // default: errors + warnings only
-    filter: z.string().optional(), // regex source
+    filter: z.string().optional(), // regex source; an invalid regex matches as plain text
+    allTabs: z.boolean().optional(), // a pinned command sees only its tab unless set
+    ...tabPin,
   }),
   z.object({
     cmd: z.literal("net"),
     failed: z.boolean().optional(), // only status >= 400 / aborted
-    filter: z.string().optional(), // regex source matched against url
+    filter: z.string().optional(), // regex source matched against url; invalid → plain text
+    all: z.boolean().optional(), // every resource type; default xhr, fetch and document
+    allTabs: z.boolean().optional(),
+    ...tabPin,
   }),
+  // Response body of one NetEntry (by id), fetched on demand while the page
+  // that made it is still open. Text bodies only; capped at TEXT_MAX_CHARS.
+  z.object({ cmd: z.literal("netBody"), id: z.number().int().nonnegative() }),
   z.object({ cmd: z.literal("js"), expression: z.string(), ...tabPin }),
   // Install an in-page controller and poll a predicate — entirely daemon-side,
   // zero model turns while it runs. THE primitive for driving real-time games:
@@ -306,6 +355,21 @@ export interface ElsResult {
   total: number; // total interactive found (may exceed els.length)
   truncated: boolean;
   rendered: string; // preformatted lines: `[3] button "Save changes"` — print as-is
+  // els --diff: changes since this tab's previous scan (els/rendered then hold
+  // only added + changed). Absent on a full scan.
+  diff?: { added: number; removed: number[]; changed: number };
+}
+
+// What an action changed, measured across the action and its settle.
+export interface ActionDelta {
+  url?: string; // new URL when it changed
+  title?: string; // new title when it changed
+  dialog?: "opened" | "closed"; // a modal/dialog appeared or went away
+  alerts?: string[]; // new role=alert/status/toast text, max 3, 200 chars each
+  added: number; // element nodes added to the DOM
+  removed: number; // element nodes removed
+  focused?: string; // the focused element afterwards, as `role "name"`
+  newTab?: PageInfo; // a popup/tab this action opened (it is not made active)
 }
 export interface ActionResult {
   // returned by click/fill/press/select/mouse/drag/key/wheel/back/reload/wait
@@ -313,17 +377,29 @@ export interface ActionResult {
   navigated: boolean; // url changed as a result of the action
   consoleErrors: string[]; // NEW console errors emitted during the action (max 5)
   settledMs: number; // adaptive settle wait after the action (0 when skipped)
+  delta?: ActionDelta;
+  then?: { els?: ElsResult; text?: TextResult; snap?: SnapResult }; // per the action's `then`
 }
 export interface ExpectResult { pass: boolean; detail: string }
-export interface SnapResult { path: string; width: number; height: number; bytes: number }
+export interface SnapResult {
+  path: string;
+  width: number; // of the saved image
+  height: number; // of the saved image (full-page height for --full)
+  bytes: number;
+  format?: "png" | "jpeg";
+}
 export interface TextResult { text: string; truncated: boolean }
 export interface ConsoleEntry {
   t: number; // ms since daemon start
+  tab?: number; // stable page id that logged it
   level: "log" | "info" | "warn" | "error" | "pageerror";
   text: string; // capped 400 chars
   url: string; // page url at time of entry
 }
 export interface NetEntry {
+  id?: number; // for netBody
+  tab?: number; // stable page id that made the request
+  resourceType?: string; // document, xhr, fetch, script, image, …
   t: number;
   method: string;
   url: string; // capped 200 chars
@@ -331,7 +407,15 @@ export interface NetEntry {
   ms: number; // duration
   failed: boolean;
 }
-export interface JsResult { value: string; truncated: boolean } // JSON.stringify'd
+export interface JsResult { value: string; truncated: boolean } // always valid JSON
+export interface NetBodyResult {
+  id: number;
+  url: string;
+  status: number;
+  contentType: string;
+  body: string;
+  truncated: boolean;
+}
 export interface DriveResult {
   satisfied: boolean; // until became truthy before the timeout
   elapsedMs: number;

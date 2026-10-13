@@ -671,6 +671,12 @@ export class Session {
     if ("selector" in target) {
       return { locator: page.locator(target.selector).first(), stable: target.selector };
     }
+    // Interim until resolve.ts lands (phase 2): plain Playwright lookups.
+    if ("testid" in target) return { locator: page.getByTestId(target.testid).first(), stable: target.testid };
+    if ("label" in target) return { locator: page.getByLabel(target.label).first(), stable: target.label };
+    if ("role" in target) {
+      throw { code: "bad_request", message: "role targets need the new resolver (phase 2)" };
+    }
 
     const text = target.text;
     const roles = ["button", "link", "tab", "menuitem", "checkbox", "radio"];
