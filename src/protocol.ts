@@ -36,7 +36,10 @@ export const LOGS_DIR = "logs"; // ~/.bx/logs/<profile>.log (daemon stdout/stder
 // ---------------------------------------------------------------------------
 
 export const TargetSchema = z.union([
-  z.object({ ref: z.number().int().positive() }),
+  // orText: the CLI sends bare digits ("2") as {ref: 2, orText: "2"} — the
+  // daemon uses the ref only when it exists in the page's current registry,
+  // otherwise resolves orText as a text target. `@2` is always a ref.
+  z.object({ ref: z.number().int().positive(), orText: z.string().min(1).optional() }),
   z.object({ text: z.string().min(1) }),
   z.object({ selector: z.string().min(1) }),
 ]);
@@ -97,6 +100,17 @@ export const BUDGET = {
 // command whose tab has been closed fails with code "no_page".
 const tabPin = { tab: z.number().int().nonnegative().optional() };
 
+// Per-command deadline, sent as a request header (not part of Cmd): the
+// daemon answers `deadline` when a command runs longer. Default 10 s, clamped
+// to 1 s..10 min; drive gets its own timeoutMs + 5 s; recordings are exempt.
+export const DEADLINE_HEADER = "x-bx-deadline-ms";
+export const DEFAULT_DEADLINE_MS = 10_000;
+
+// Adaptive settle for actions: after the action the daemon waits until the DOM
+// and the action's network requests are quiet for 50 ms, capped at `settle` ms
+// (default 1500; 0 skips settling). ActionResult.settledMs reports the wait.
+const actionOpts = { settle: z.number().int().nonnegative().optional() };
+
 export const CmdSchema = z.discriminatedUnion("cmd", [
   z.object({ cmd: z.literal("open"), url: z.string(), ...tabPin }),
   z.object({
@@ -109,6 +123,7 @@ export const CmdSchema = z.discriminatedUnion("cmd", [
     cmd: z.literal("click"),
     target: TargetSchema,
     timeoutMs: z.number().optional(),
+    ...actionOpts,
     ...tabPin,
   }),
   z.object({
@@ -116,14 +131,16 @@ export const CmdSchema = z.discriminatedUnion("cmd", [
     target: TargetSchema,
     value: z.string(),
     timeoutMs: z.number().optional(),
+    ...actionOpts,
     ...tabPin,
   }),
-  z.object({ cmd: z.literal("press"), key: z.string(), ...tabPin }), // e.g. "Enter", "Control+a"
+  z.object({ cmd: z.literal("press"), key: z.string(), ...actionOpts, ...tabPin }), // e.g. "Enter", "Control+a"
   z.object({
     cmd: z.literal("select"),
     target: TargetSchema,
     value: z.string(), // option value or label
     timeoutMs: z.number().optional(),
+    ...actionOpts,
     ...tabPin,
   }),
   z.object({
@@ -174,8 +191,8 @@ export const CmdSchema = z.discriminatedUnion("cmd", [
     pollMs: z.number().int().positive().optional(), // default 500
     ...tabPin,
   }),
-  z.object({ cmd: z.literal("back"), ...tabPin }),
-  z.object({ cmd: z.literal("reload"), ...tabPin }),
+  z.object({ cmd: z.literal("back"), ...actionOpts, ...tabPin }),
+  z.object({ cmd: z.literal("reload"), ...actionOpts, ...tabPin }),
   // Coordinate interaction (canvas/games/non-semantic UIs). x/y are CSS
   // pixels. With `in`, coordinates are relative to that element's top-left
   // (resolution-independent for a fixed-size canvas); without it, viewport
@@ -187,6 +204,7 @@ export const CmdSchema = z.discriminatedUnion("cmd", [
     y: z.number(),
     in: TargetSchema.optional(),
     button: z.enum(["left", "right", "middle"]).optional(), // default left
+    ...actionOpts,
     ...tabPin,
   }),
   z.object({
@@ -204,17 +222,19 @@ export const CmdSchema = z.discriminatedUnion("cmd", [
     mode: z.enum(["mouse", "pointer"]).optional(),
     holdMs: z.number().nonnegative().optional(), // pause after down before first move (pointer default 120)
     stepDelayMs: z.number().nonnegative().optional(), // pause between moves (pointer default 16)
+    ...actionOpts,
     ...tabPin,
   }),
   // Hold-and-release keys (WASD movement etc.): `key down w` … `key up w`.
   // One-shot chords stay on `press`.
-  z.object({ cmd: z.literal("key"), action: z.enum(["down", "up"]), key: z.string(), ...tabPin }),
+  z.object({ cmd: z.literal("key"), action: z.enum(["down", "up"]), key: z.string(), ...actionOpts, ...tabPin }),
   z.object({
     cmd: z.literal("wheel"),
     deltaY: z.number(),
     x: z.number().optional(), // move mouse here first; with `in`, element-relative
     y: z.number().optional(),
     in: TargetSchema.optional(),
+    ...actionOpts,
     ...tabPin,
   }),
   z.object({ cmd: z.literal("tabs") }),
@@ -241,8 +261,10 @@ export type CmdName = Cmd["cmd"];
 // elements when a target fails to resolve).
 // ---------------------------------------------------------------------------
 
+// relaunched: the daemon found the browser dead and relaunched it (same
+// profile and mode, one blank tab) before running this command.
 export type CmdResult<T = unknown> =
-  | { ok: true; data: T }
+  | { ok: true; data: T; relaunched?: true }
   | { ok: false; error: BxError };
 
 export interface BxError {
@@ -254,6 +276,9 @@ export interface BxError {
     | "not_recording"
     | "already_recording"
     | "browser_launch_failed"
+    | "browser_dead" // relaunch failed twice in a row
+    | "deadline" // the command outran its deadline (DEADLINE_HEADER)
+    | "ambiguous" // several equally good matches; nearMatches lists them
     | "bad_request"
     | "internal";
   message: string;
@@ -269,7 +294,11 @@ export interface PageInfo {
   active: boolean;
 }
 
-export interface OpenResult { page: PageInfo; els: ElsResult }
+export interface OpenResult {
+  page: PageInfo;
+  els: ElsResult;
+  redirectedTo?: string; // final URL when the page redirected itself after load
+}
 export interface ElsResult {
   generation: number;
   els: El[];
@@ -282,6 +311,7 @@ export interface ActionResult {
   page: PageInfo;
   navigated: boolean; // url changed as a result of the action
   consoleErrors: string[]; // NEW console errors emitted during the action (max 5)
+  settledMs: number; // adaptive settle wait after the action (0 when skipped)
 }
 export interface ExpectResult { pass: boolean; detail: string }
 export interface SnapResult { path: string; width: number; height: number; bytes: number }
@@ -326,6 +356,7 @@ export interface StatusResult {
   pages: PageInfo[];
   recording: string | null; // slug when recording
   uptimeMs: number;
+  relaunches: number; // browser relaunches since daemon start (self-heal)
 }
 
 // Action log: appended for every state-changing command (open, click, fill,
