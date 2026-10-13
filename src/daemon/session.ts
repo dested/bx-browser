@@ -198,6 +198,14 @@ function watchRequests(page: Page): RequestWatch {
     },
   };
 }
+// What fill can type into (C4): text-like inputs, textareas, contenteditable.
+const FILLABLE = [
+  `input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=submit]):not([type=button])` +
+    `:not([type=image]):not([type=reset]):not([type=file]):not([type=range]):not([type=color])`,
+  "textarea",
+  '[contenteditable=""]',
+  '[contenteditable="true"]',
+].join(", ");
 // synthesize.ts matches this mark to emit a placeholder for redacted fills.
 const REDACTED_MARK = "•••";
 const HAS_SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i;
@@ -866,14 +874,59 @@ export class Session {
 
   async fill(cmd: CmdOf<"fill">): Promise<ActionResult> {
     return this.runAction(cmd, cmd.tab, async (page) => {
-      const { locator, stable } = await this.resolveTarget(page, cmd.target);
-      const type = await locator.getAttribute("type").catch(() => null);
+      const timeout = cmd.timeoutMs ?? BUDGET.DEFAULT_TIMEOUT_MS;
+      const resolved = await this.resolveTarget(page, cmd.target);
+      const { stable } = resolved;
+      const { locator, type } = await this.fillableField(page, resolved, timeout);
       step("fill");
-      await locator.fill(cmd.value, { timeout: cmd.timeoutMs ?? BUDGET.DEFAULT_TIMEOUT_MS });
+      await locator.fill(cmd.value, { timeout });
       const secret = type === "password";
       const shown = secret ? REDACTED_MARK : cmd.value;
       return { text: `filled "${stable}" with "${shown}"`, stableTarget: stable, secret };
     }, this.settleCap(cmd.settle));
+  }
+
+  /**
+   * The field a fill should type into (C4). Targets often land on a wrapper
+   * (a form row, a custom input component) or a label: use the target itself
+   * when it takes text, else its single fillable descendant, else the
+   * label's control. None or several is a miss that says how many.
+   */
+  private async fillableField(
+    page: Page,
+    resolved: Resolved,
+    timeout: number,
+  ): Promise<{ locator: Locator; type: string | null }> {
+    step("find the field");
+    const probe = await resolved.locator.evaluate(
+      (el, selector) => {
+        const typeOf = (e: Element): string | null => e.getAttribute("type");
+        if (el.matches(selector)) return { self: true, inside: 0, controlId: null, type: typeOf(el) };
+        const inside = el.querySelectorAll(selector);
+        const only = inside.length === 1 ? inside[0] : undefined;
+        const control = el instanceof HTMLLabelElement ? el.control : null;
+        return {
+          self: false,
+          inside: inside.length,
+          controlId: control && control.matches(selector) && control.id ? control.id : null,
+          type: only ? typeOf(only) : control ? typeOf(control) : null,
+        };
+      },
+      FILLABLE,
+      { timeout },
+    );
+    if (probe.self) return { locator: resolved.locator, type: probe.type };
+    if (probe.inside === 1) return { locator: resolved.locator.locator(FILLABLE).first(), type: probe.type };
+    if (probe.inside === 0 && probe.controlId !== null) {
+      return { locator: page.locator(`[id="${probe.controlId.replaceAll('"', '\\"')}"]`), type: probe.type };
+    }
+    throw {
+      code: "target_not_found",
+      message:
+        probe.inside > 1
+          ? `"${resolved.stable}" is not a text field and holds ${probe.inside} of them — target one directly`
+          : `"${resolved.stable}" is not a text field and holds none`,
+    };
   }
 
   async select(cmd: CmdOf<"select">): Promise<ActionResult> {
