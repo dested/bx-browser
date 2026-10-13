@@ -2,6 +2,31 @@
 
 Newest first. Append-only; supersede, never delete.
 
+## 2026-10-12 — Recording is a CDP screencast of one tab, never a relaunch
+
+**Why:** recordVideo is a context-creation option, so every start and stop
+relaunched Chrome (fleet medians 1.06 s start, 5.6 s stop) and lost tab state.
+Page.startScreencast on the chosen tab, piped into our own ffmpeg, starts in
+~50 ms and stops in ~25 ms with tabs, typed values and page ids intact. Every
+frame is captured (everyNthFrame 2 dropped single repaints); distill runs in
+the background after stop. Adds ring mode (`record save --last N`), marks and
+`--follow`.
+**Rejected:** Playwright's page.screencast (its frame callback never fires
+headed); keeping recordVideo with a smarter tab pick; everyNthFrame 2 plus a
+quiet-page screenshot (the screenshot repaints and loops).
+Supersedes the relaunch-based recording and its activity-based tab selection.
+
+## 2026-10-12 — A NativeAOT bx.exe front door, not a .NET rewrite
+
+**Why:** per-call cost was the Bun CLI's process start (~70 ms of ~90). bx.exe
+(dotnet/bx, 1.9 MB) posts the raw argv to the daemon's /argv, which parses and
+renders with the same src/argv code the CLI uses, so output stays
+byte-identical (parity test); ~50 ms saved per call. Verbs that need the
+caller's process (stdin, run, agent, gc…) fall back to `bun src/cli.ts`.
+**Rejected:** a .NET daemon (Playwright parity, two codebases, no measured
+win once Chrome dominates); `bun --compile` (78 ms); job objects (Chrome
+already dies within 363 ms of the daemon).
+
 ## 2026-10-12 — Refs are element identities, not scan generations
 
 **Why:** a ref that expired on every `els` scan or navigation forced a re-scan
