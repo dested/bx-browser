@@ -88,7 +88,20 @@ const QUIET_MS = 50;
 const SETTLE_CAP_MS = 1500;
 const MODIFIER_KEYS = new Set(["Shift", "Control", "Alt", "Meta"]);
 // The page's document was replaced (navigation) under an evaluate.
-const CONTEXT_GONE = /Execution context was destroyed|Cannot find context|navigat/i;
+const CONTEXT_GONE = /Execution context was destroyed|Cannot find context/;
+// goto's wording when the page navigated itself away before load.
+const REDIRECTED_AWAY = /ERR_ABORTED|interrupted by another navigation|frame was detached/;
+// open (R4): the URL must hold this long before the page counts as arrived.
+const URL_QUIET_MS = 300;
+const URL_SETTLE_CAP_MS = 3000;
+
+function normalizeUrl(url: string): string {
+  try {
+    return new URL(url).href;
+  } catch {
+    return url;
+  }
+}
 
 /** In-page: resolves once no DOM mutation has happened for `quietMs`. */
 function domQuiet(o: { quietMs: number; capMs: number }): Promise<{ quiet: boolean; title: string }> {
@@ -702,13 +715,52 @@ export class Session {
     const url =
       HAS_SCHEME.test(cmd.url) || OPAQUE_SCHEME.test(cmd.url) ? cmd.url : `https://${cmd.url}`;
     const page = await this.pageFor(cmd.tab);
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
-    const scan = await this.scan(page);
+    const urlBefore = page.url();
+    try {
+      await page.goto(url, { waitUntil: "load", timeout: 15000 });
+    } catch (err) {
+      // A page that redirects itself before load (auth guards) makes goto
+      // report its own navigation as aborted while the redirect carries on.
+      // Only a page that went nowhere is a real failure.
+      if (!REDIRECTED_AWAY.test(errorMessage(err)) || page.url() === urlBefore) throw err;
+    }
+    await this.urlSettled(page);
+    let scan: DistillResult;
+    try {
+      scan = await this.scan(page);
+    } catch (err) {
+      // It redirected again after the quiet window; scan the page it landed on.
+      if (!CONTEXT_GONE.test(errorMessage(err))) throw err;
+      await this.urlSettled(page);
+      scan = await this.scan(page);
+    }
     this.appendAction({ cmd: "open", url }, `opened ${url}`, url, this.pageId(page));
-    return {
+    const finalUrl = page.url();
+    const result: OpenResult = {
       page: this.pageInfo(page),
       els: { generation: this.refsFor(page).generation, ...renderEls(scan, {}) },
     };
+    if (normalizeUrl(finalUrl) !== normalizeUrl(url)) result.redirectedTo = finalUrl;
+    return result;
+  }
+
+  /**
+   * Client-side redirects land after `load`: wait until the main frame's URL
+   * has held for URL_QUIET_MS (capped), then for the final document's load.
+   */
+  private async urlSettled(page: Page): Promise<void> {
+    const started = Date.now();
+    let last = page.url();
+    let since = started;
+    while (Date.now() - since < URL_QUIET_MS && Date.now() - started < URL_SETTLE_CAP_MS) {
+      await sleep(50);
+      const now = page.url();
+      if (now !== last) {
+        last = now;
+        since = Date.now();
+      }
+    }
+    await page.waitForLoadState("load", { timeout: 5000 }).catch(() => undefined);
   }
 
   async els(cmd: CmdOf<"els">): Promise<ElsResult> {
@@ -894,7 +946,16 @@ export class Session {
 
   async js(cmd: CmdOf<"js">): Promise<JsResult> {
     const page = await this.pageFor(cmd.tab);
-    const value = await page.evaluate<unknown>(`(async () => (${cmd.expression}))()`);
+    const source = `(async () => (${cmd.expression}))()`;
+    let value: unknown;
+    try {
+      value = await page.evaluate<unknown>(source);
+    } catch (err) {
+      // A redirect replaced the document under us; run once on the new one.
+      if (!CONTEXT_GONE.test(errorMessage(err))) throw err;
+      await page.waitForLoadState("load", { timeout: 5000 }).catch(() => undefined);
+      value = await page.evaluate<unknown>(source);
+    }
     const serialized = value === undefined ? "undefined" : (JSON.stringify(value) ?? "undefined");
     const truncated = serialized.length > BUDGET.JS_MAX_CHARS;
     return {
