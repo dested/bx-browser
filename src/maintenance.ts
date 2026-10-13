@@ -36,6 +36,9 @@ export const CACHE_DIRS = [
   "GrShaderCache",
   "ShaderCache",
   "Default/Service Worker/CacheStorage",
+  // Chrome's histogram store; rewritten every launch, never read back by bx.
+  "BrowserMetrics",
+  "BrowserMetrics-spare.pma", // a file, not a folder: dirBytes and rm handle both
 ] as const;
 
 function defaultBxDir(): string {
@@ -164,7 +167,13 @@ export async function dirBytes(dir: string, checkRoot = true): Promise<number> {
   try {
     entries = await readdir(dir, { withFileTypes: true });
   } catch {
-    return 0;
+    // Not a folder: a plain file at the root (a CACHE_DIRS entry like BrowserMetrics-spare.pma) counts its size.
+    try {
+      const st = await stat(dir);
+      return st.isFile() ? st.size : 0;
+    } catch {
+      return 0;
+    }
   }
   const sizes = await Promise.all(
     entries.map(async (e): Promise<number> => {
