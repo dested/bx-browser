@@ -186,10 +186,10 @@ Board: down · Last pushed: b3dc301 (origin/main; local main ahead, unpushed) ·
 | Agent | Model | Owns | Item now | Last sha / artifact | Status |
 | --- | --- | --- | --- | --- | --- |
 | scout | opus-xhigh | research report | Q1–Q3 | — | running |
-| core | opus-high | session.ts, daemon.ts, serialize.ts | wave 1 sample | — | running |
+| core | opus-high | session.ts, daemon.ts, serialize.ts | wave 1 sample: R1 D2 O4 S6 S1 R4 R3 O3 A1-daemon | 8e3d2a2 | ready, lead-reviewed (tsc 0, unit 17/17); idle awaiting Sal |
 | lead | — | cli, client, protocol, constants, script | R5 S2 S3 C7 A1-cli | aafd640 | done: CLI js 1 94→67 ms (bun floor 45), bx do 20 cmds 105 ms |
 
 Live tool: global bx → G:/code/bx-live (a80f037), relinked by Sal 2026-10-12.
 Background jobs: none
-Waiting on Sal: sample approval (after core reports)
+Waiting on Sal: sample approval (reported 2026-10-12); delete core-dev, core-smoke, bxlivecheck profiles (hook blocked core; lead won't proxy)
 Next: review core's sample, then spawn resolver, agentkit, infra
