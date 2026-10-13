@@ -232,20 +232,25 @@ export async function doctor(opts: DoctorOptions = {}): Promise<DoctorReport> {
     // A helper whose browser process is alive goes down with that browser.
     if (!p.browser && pidsByProfile.get(name.toLowerCase())?.has(p.parentPid)) continue;
     const daemon = owner.get(name.toLowerCase());
-    if (!daemon) {
+    if (daemon && p.parentPid === daemon.pid) continue;
+    if (!daemon && !pidAlive(p.parentPid)) {
+      // Its launcher is gone: the classic dead-daemon leftover.
       findings.push({
         kind: "orphan-chrome",
         profile: name,
         pid: p.pid,
-        detail: `chrome pid ${p.pid}${p.browser ? "" : " (helper)"} holds profile "${name}" with no daemon`,
+        detail: `chrome pid ${p.pid}${p.browser ? "" : " (helper)"} holds profile "${name}" and its daemon is gone`,
         fixable: true,
       });
-    } else if (p.browser && p.parentPid !== daemon.pid) {
+    } else if (p.browser) {
+      // Something else still runs it (a test harness, a second launcher): report only.
       findings.push({
         kind: "stray-chrome",
         profile: name,
         pid: p.pid,
-        detail: `chrome pid ${p.pid} holds profile "${name}" but its parent is not the daemon (pid ${daemon.pid ?? "?"}); stop the daemon, then run doctor again`,
+        detail: daemon
+          ? `chrome pid ${p.pid} holds profile "${name}" beside its daemon (pid ${daemon.pid ?? "?"}), under pid ${p.parentPid}`
+          : `chrome pid ${p.pid} holds profile "${name}" under running pid ${p.parentPid}, not a bx daemon`,
         fixable: false,
       });
     }

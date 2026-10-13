@@ -162,11 +162,12 @@ export async function profileLocks(profileDir: string): Promise<string[]> {
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * Frees a profile another (dead) daemon's Chrome still holds: kills every
- * Chrome started with this user-data-dir, then removes the lock files. Does
- * nothing when a live daemon other than `selfPid` owns the profile, since that
- * Chrome is in use. The daemon passes its own pid: its own browser is the one
- * that failed to start, so anything holding the profile is a leftover.
+ * Frees a profile a dead daemon's Chrome still holds: kills every Chrome
+ * started with this user-data-dir, then removes the lock files. Does nothing
+ * when a live daemon other than `selfPid` owns the profile, or when a browser
+ * on it still has a living parent other than `selfPid`: that Chrome is in use.
+ * The daemon passes its own pid, since its own browser is the one that failed
+ * to start and anything of its own still holding the profile is a leftover.
  */
 export async function clearProfileLocks(profileDir: string, opts: { selfPid?: number } = {}): Promise<ClearResult> {
   const profile = path.basename(profileDir);
@@ -180,6 +181,17 @@ export async function clearProfileLocks(profileDir: string, opts: { selfPid?: nu
   } catch {
     // Without the process list, removing the locks alone may still be enough.
     procs = [];
+  }
+  // A Chrome whose launcher still runs (a test harness driving Playwright on
+  // this folder, say) is in use, not orphaned: leave the profile alone.
+  const held = procs.find((p) => p.browser && p.parentPid !== opts.selfPid && pidAlive(p.parentPid));
+  if (held) {
+    return {
+      cleared: false,
+      killed: [],
+      removed: [],
+      skipped: `chrome pid ${held.pid} on profile "${profile}" belongs to running pid ${held.parentPid}`,
+    };
   }
   const killed: number[] = [];
   // Browser processes first: /T takes their renderers with them.
