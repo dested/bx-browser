@@ -13,9 +13,17 @@ talk to it over localhost HTTP. Everything is token-budgeted at the source.
 src/
   protocol.ts        THE contract: Cmd union, results, budgets, targets, agent types
   constants.ts       dirs, headers, DEFAULT_DEADLINE_MS — zod-free so the CLI imports it cheaply
-  cli.ts             bx entry — arg parsing, dispatch, human output, exit codes, `bx -`/`bx do` batch
-  client.ts          daemon discovery/spawn (node, detached), cmd<T>() fast path, parseTarget, formatAction
+  cli.ts             bx entry: process concerns only (stdin, batch loop, timing) + the
+                     CLI-only verbs (run agent install-skill doctor gc profiles stop help)
+  client.ts          daemon discovery/spawn (node, detached), cmd<T>() fast path;
+                     re-exports parseTarget/formatAction/CliError from src/argv
   script.ts          batch splitting: splitScript / splitWords (shell-style quoting)
+  argv/              ⚠ shared with the daemon (Node type stripping: node:* only, no Bun.*)
+    parse.ts         argv → Globals (+ MSYS repair, LOCAL_VERBS, deadlineFor, client tag)
+    verbs.ts         every daemon verb: args → Cmd → result → stdout/stderr/exit (VerbIO)
+    serve.ts         daemon POST /argv: whole command line in, CLI bytes out, or {fallback}
+    format.ts        human renderers (actions, els, status, console/net, tabs)
+    target.ts        parseTarget; envelope.ts response check; usage.ts USAGE; errors.ts CliError
   maintenance.ts     bx doctor / bx gc (Bun side; dry run unless --fix / --yes; never follows links)
   daemon/            ⚠ Node runtime: no Bun.*, no non-erasable TS syntax
     daemon.ts        node:http server, routes (/health /cmd /debug* /shutdown /fixture /harness*)
@@ -31,7 +39,9 @@ src/
     distill.ts       els in-page scan: shadow DOM, same-origin iframes, modals, --diff, --clickables
     observe.ts       console/net circular buffers tagged by tab, net ids + netBody, per-action error marks
     osPassword.ts    pre-launch seed of Chrome's OS blank-password cache (stops failed Windows logons)
-    record.ts        recording: video relaunch cycle + harness orchestration
+    record.ts        recording V1: start/stop/mark/save/status/distill, ring buffer, follow,
+                     package (video.webm, transcript.txt, recording.json), background distill
+    screencast.ts    CDP Page.startScreencast per tab → paced frames → our own ffmpeg (VP8)
     harness/harness.ts  browser-side: runs video-to-prompt distill() in-page
   flows/
     api.ts           flow() + FlowContext (what "bx/flow" resolves to)
@@ -49,9 +59,14 @@ fixtures/app/        "TaskBox" test app served by the daemon at /fixture
 flows/examples/      canonical user-facing flow examples
 skill/SKILL.md       the Claude Code skill (installed via `bx install-skill`)
 scripts/build-harness.ts  Bun.build bundle of harness.ts (+ self-heals dep dist)
+scripts/build-frontdoor.ts  dotnet publish → dist/bx.exe (no build servers: no console windows)
+dotnet/bx/           bx.exe: NativeAOT front door (Program.cs). Posts argv to /argv;
+                     runs `bun src/cli.ts` for LOCAL_VERBS, no daemon, or {fallback}
 tests/smoke.test.ts  live daemon suite (bun test), profile "bxtest"
 tests/flows.test.ts  synthesis + bx/flow-alias unit tests (no browser)
-tests/record.test.ts recording tab-selection unit tests (no browser)
+tests/record.test.ts recording unit tests; BX_RECORD_LIVE=<p> adds live start/mark/save/follow/mp4
+tests/screencast.test.ts  frame pacing, ring caps (no browser)
+tests/argv.test.ts   argv core unit tests; BX_PARITY_PROFILE=<p> adds live bx.exe vs bun parity
 tests/actionLog.test.ts  action-log cap: absolute indexes across trims, recording hold (no browser)
 tests/resolve.test.ts    resolver scenarios in a real headless Chrome (re-runs itself under Node)
 tests/serialize.test.ts  js wrapping + serializer (no browser)
@@ -73,6 +88,8 @@ Dockerfile, drydock.yaml, .github/  DRYDOCK-MANAGED (portal regenerates — don'
 | Target matching order | daemon/resolve.ts + the Targets comment in protocol.ts |
 | Post-action settle / deltas | daemon/session.ts settle(), runAction |
 | Cleanup (orphans, locks, disk) | daemon/orphans.ts, maintenance.ts |
+| A verb's flags, Cmd mapping or human output | argv/verbs.ts (+ format.ts); the CLI and bx.exe both pick it up |
+| Which verbs bx.exe hands to bun | LOCAL_VERBS in argv/parse.ts AND LocalVerbs in dotnet/bx/Program.cs |
 | Agent prices / model ids | agent/pricing.ts (bump PRICES_CHECKED) |
 | Output budgets | protocol.ts BUDGET |
 | Agent behavior/system prompt | agent/driver.ts |
@@ -108,6 +125,16 @@ Dockerfile, drydock.yaml, .github/  DRYDOCK-MANAGED (portal regenerates — don'
   instead of hanging; the abandoned work's result is discarded.
 - The CLI posts straight to the run file's port and only spawns a daemon when
   the connection is refused — a request that reached a daemon is never resent.
+- Verb parsing/rendering lives in src/argv/ and also runs inside the daemon
+  (/argv for bx.exe). Keep it Node-safe; stdin reading stays in cli.ts. bx.exe
+  output must stay byte-identical to `bun src/cli.ts`: a new served verb goes
+  through runVerb, then `bun run build:frontdoor` and
+  `BX_PARITY_PROFILE=<p> bun test tests/argv.test.ts`.
+- bx.exe falls back to bun only when nothing ran (no run file, refused,
+  {fallback}, 400/401/404). /argv's --json "ms" is daemon time only.
+- ⚠ Nothing bx or its scripts spawn may open a window: windowsHide (Node/Bun),
+  CreateNoWindow (.NET), no shell:true / cmd /c / start; dotnet builds only via
+  scripts/build-frontdoor.ts (leftover MSBuild/compiler servers opened consoles).
 - A dead browser is relaunched on the next command (`relaunched: true`,
   `status.relaunches`); its old tab ids answer `no_page … lost`.
 - New session command handlers: `runAction(cmd, cmd.tab, perform)` +
@@ -132,22 +159,18 @@ Dockerfile, drydock.yaml, .github/  DRYDOCK-MANAGED (portal regenerates — don'
   `expect text` (they retry), not a bare `js location.pathname` right after.
 - `video-to-prompt` (git dep) ships no dist; scripts/build-harness.ts builds it
   in place on demand. Durable fix = `prepare` script in that repo (user's).
-- Recording relaunches the browser context twice (video is a context-creation
-  option); open tabs are restored to the active URL only.
-- Recording selects the captured tab by ACTION ACTIVITY, not byte size —
-  byte-size (or frame-count) selection silently loses to a looping animation on
-  an idle tab and ships the wrong/blank video. recordStop tallies the action log
-  per tab (`entry.tab`) and picks the most-driven page; a guard throws if the
-  winning tab saw zero actions while another was driven. The persistent ffmpeg
-  window during a record is Playwright's own recordVideo encoder (not a bx
-  spawn) — see decisions.md for the CDP-screencast fix that retires both.
-- Recording packages ship the video twice (raw.webm + byte-identical
-  rec-01/walkthrough.webm) — accepted for v1: report.md references the latter,
-  CLI/docs the former. Local disk only; recordings/ is gitignored.
+- Recording never relaunches Chrome: it is a CDP screencast of one tab (or the
+  active tab with `--follow`) piped into our own ffmpeg. Every frame is captured
+  (everyNthFrame 2 dropped single repaints); pacing to 25 fps happens downstream.
+  A still page sends no frames, so start races a screenshot against the first.
+  Never run Playwright's recordVideo or page.screencast on a recorded page.
+- Distill runs in the background after `record stop` (status lists it under
+  `distilling`); `--distill` waits. Report wording says "action log", never
+  speech. Packages are local only; recordings/ is gitignored.
 - expect returns pass:false as ok:true data — only the CLI turns it into exit 1.
 - One daemon per profile; ~/.bx/run/<profile>.json is the discovery file.
 - Daemons exit after `BX_IDLE_MINUTES` (default 15) with no /cmd and no active
-  recording. `bx stop --all` sweeps every daemon and clears stale run files.
+  recording or background distill. `bx stop --all` sweeps every daemon and clears stale run files.
 - ⚠ Every Chrome launch must be preceded by `seedOsPasswordCheck(profileDir)`.
   On a cold profile, Chrome checks for a blank Windows password with a real
   (failed) interactive logon, and a burst of those locks the Windows account.
