@@ -118,6 +118,12 @@ const SCENARIOS: Record<string, Scenario> = {
     assert.equal(await clickHit(page, { testid: "go-btn" }), "go");
     assert.equal(await clickHit(page, { role: "link", name: "Go" }), "link");
     assert.equal((await failure(page, { text: "Go" })).code, "ambiguous");
+
+    // a test id names non-interactive elements too (the fixture's game canvas)
+    const canvas = await newPage(`<canvas id="game" data-testid="game-canvas" width="200" height="100"></canvas>`);
+    const { locator, stable } = await resolveTarget(canvas, { text: "game-canvas" }, { timeoutMs: 300 });
+    assert.equal(stable, "game-canvas");
+    assert.equal(await locator.evaluate((e) => e.id), "game");
   },
 
   "C1: not found returns near matches as refs": async (newPage) => {
