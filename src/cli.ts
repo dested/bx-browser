@@ -8,6 +8,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   CliError,
+  type MatchOpts,
   cmd,
   formatAction,
   formatConsoleEntry,
@@ -37,6 +38,7 @@ import type {
   ElsResult,
   ExpectResult,
   JsResult,
+  NetBodyResult,
   NetEntry,
   OpenResult,
   RecordStartResult,
@@ -63,23 +65,49 @@ Navigation
 
 Observation
   els [--all] [--filter <text>]    interactive elements as [ref] role "name"
-  text [selector]                  visible text of the page, or of one selector
+      [--diff] [--clickables]      --diff: only what changed since the last els;
+                                   --clickables: also cursor:pointer divs
+  text [target] [--md]             visible text of the main content, or of one
+                                   target; --md keeps headings, lists and links
   snap [path] [--full]             screenshot, downscaled; --full for whole page
+       [--el <target>] [--jpeg]    --el crops to one element; a .jpg path or
+       [--quality <n>] [--stable]  --quality implies --jpeg; --stable waits for
+                                   two identical frames
   console [--all] [--filter <re>]  console entries (errors + warnings by default)
-  net [--failed] [--filter <re>]   network requests
+          [--all-tabs]
+  net [--failed] [--all]           network requests: xhr, fetch and documents;
+      [--filter <re>] [--all-tabs] --all for every resource type
+  net body <id>                    response body of a request listed by net
   js <code | - | @file.js>         run JS in the page: an expression, or statements
                                    whose last expression is the result; - reads
                                    stdin, @file reads a file (no shell quoting)
   status                           daemon, browser, tabs and recording state
 
-Interaction  (<target> = @ref | selector (#, ., [, //, css=, xpath=) | visible text;
-              a bare number is a ref when that ref exists, otherwise text)
+Interaction  (<target> = @ref | text:<t> | testid:<id> | label:<l> | role:<role>[:<name>]
+              | selector (#, ., [, //, css=, xpath=) | visible text. A bare
+              number is a ref when that ref exists, otherwise text. The best
+              match wins (exact name > exact text > prefix > substring); a tie
+              is an "ambiguous" error listing the candidates. --exact: exact
+              matches only; --first: take the first of a tie)
   click <target>                   click an element
-  fill <target> <value>            set an input's value
+  fill <target> <value>            set an input's value (finds the input inside
+                                   a labelled wrapper)
   press <key>                      press a key, e.g. Enter or Control+a
-  select <target> <value>          choose an option in a <select>
+  select <target> <value>          pick by value or label in a <select> or an
+                                   ARIA combobox
   wait <ms | selector | text>      sleep, or wait for a selector or visible text
+       | --idle | --gone <target>  ...or until network + DOM are quiet, a target
+       | --url <part> | --js <e>   is gone, the url contains <part>, or <e> is truthy
   expect <kind> <value>            assert; kind = text | url | visible | not-visible
+
+  Every action (click fill press select back reload mouse drag key wheel) takes:
+  --then els|text|snap             append an observation to the same result
+  --until <text>                   after the action, wait for this text to show
+  --settle <ms>                    cap the post-action settle (0 skips it; by
+                                   default it waits for the DOM and the
+                                   action's requests to go quiet)
+  and reports what changed: url, title, dialog, alerts, dom +added −removed,
+  focus, a new background tab.
 
 Canvas / coordinates  (games and non-semantic UIs; with --in <target>, x and y
 are relative to that element's top-left, otherwise to the viewport)
@@ -252,6 +280,27 @@ function takeTimeout(args: string[]): number | undefined {
     throw new CliError(2, "--timeout takes a positive number of milliseconds");
   }
   return ms;
+}
+
+function takeMatch(args: string[]): MatchOpts {
+  return { exact: takeFlag(args, "--exact"), first: takeFlag(args, "--first") };
+}
+
+type Then = "els" | "text" | "snap";
+
+/** --settle, --then and --until: the options every action verb shares. */
+function takeActionOpts(args: string[]): { settle?: number; then?: Then; until?: string } {
+  const settle = takeDelayMs(args, "--settle");
+  const rawThen = takeOption(args, "--then");
+  const until = takeOption(args, "--until");
+  if (rawThen !== undefined && rawThen !== "els" && rawThen !== "text" && rawThen !== "snap") {
+    throw new CliError(2, `--then takes els | text | snap, not "${rawThen}"`);
+  }
+  return {
+    ...(settle === undefined ? {} : { settle }),
+    ...(rawThen === undefined ? {} : { then: rawThen }),
+    ...(until === undefined ? {} : { until }),
+  };
 }
 
 function expectKind(kind: string): "text" | "url" | "visible" | "notVisible" {
@@ -471,8 +520,16 @@ function renderTabChange(verb: string, detail: string): (data: TabsResult) => st
 
 function renderEls(data: ElsResult): string {
   const rendered = data.rendered.trim();
-  if (rendered.length === 0) return "(no interactive elements)";
-  return data.truncated ? `${rendered}\n…(${data.total} total, list truncated)` : rendered;
+  const diff = data.diff;
+  const head =
+    diff === undefined
+      ? undefined
+      : `diff: +${diff.added} ~${diff.changed} −${diff.removed.length}` +
+        (diff.removed.length > 0 ? ` (gone: ${diff.removed.map((r) => `@${r}`).join(" ")})` : "");
+  let body: string;
+  if (rendered.length === 0) body = head === undefined ? "(no interactive elements)" : "(nothing new)";
+  else body = data.truncated ? `${rendered}\n…(${data.total} total, list truncated)` : rendered;
+  return head === undefined ? body : `${head}\n${body}`;
 }
 
 function renderEntries<T>(entries: T[], format: (entry: T) => string): string {
@@ -536,23 +593,29 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
 
     case "els": {
       const all = takeFlag(args, "--all");
+      const diff = takeFlag(args, "--diff");
+      const clickables = takeFlag(args, "--clickables");
       const filter = takeOption(args, "--filter");
-      return send<ElsResult>(g, { cmd: "els", all, filter }, renderEls);
+      return send<ElsResult>(g, { cmd: "els", all, filter, diff, clickables }, renderEls);
     }
 
     case "click": {
       const timeoutMs = takeTimeout(args);
+      const match = takeMatch(args);
+      const act = takeActionOpts(args);
       const target = args[0];
       if (target === undefined) throw new CliError(2, "usage: bx click <target>");
       return send<ActionResult>(
         g,
-        { cmd: "click", target: parseTarget(target), timeoutMs },
+        { cmd: "click", target: parseTarget(target, match), timeoutMs, ...act },
         (d) => formatAction("clicked", q(target), d),
       );
     }
 
     case "fill": {
       const timeoutMs = takeTimeout(args);
+      const match = takeMatch(args);
+      const act = takeActionOpts(args);
       const target = args[0];
       const value = args[1];
       if (target === undefined || value === undefined) {
@@ -560,19 +623,22 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
       }
       return send<ActionResult>(
         g,
-        { cmd: "fill", target: parseTarget(target), value, timeoutMs },
+        { cmd: "fill", target: parseTarget(target, match), value, timeoutMs, ...act },
         (d) => formatAction("filled", `${q(target)} with ${q(value)}`, d),
       );
     }
 
     case "press": {
+      const act = takeActionOpts(args);
       const key = args[0];
       if (key === undefined) throw new CliError(2, "usage: bx press <key>");
-      return send<ActionResult>(g, { cmd: "press", key }, (d) => formatAction("pressed", key, d));
+      return send<ActionResult>(g, { cmd: "press", key, ...act }, (d) => formatAction("pressed", key, d));
     }
 
     case "select": {
       const timeoutMs = takeTimeout(args);
+      const match = takeMatch(args);
+      const act = takeActionOpts(args);
       const target = args[0];
       const value = args[1];
       if (target === undefined || value === undefined) {
@@ -580,15 +646,47 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
       }
       return send<ActionResult>(
         g,
-        { cmd: "select", target: parseTarget(target), value, timeoutMs },
+        { cmd: "select", target: parseTarget(target, match), value, timeoutMs, ...act },
         (d) => formatAction("selected", `${q(value)} in ${q(target)}`, d),
       );
     }
 
     case "wait": {
       const timeoutMs = takeTimeout(args);
+      const match = takeMatch(args);
+      const idle = takeFlag(args, "--idle");
+      const gone = takeOption(args, "--gone");
+      const url = takeOption(args, "--url");
+      const js = takeOption(args, "--js");
+      const named = (idle ? 1 : 0) + [gone, url, js].filter((c) => c !== undefined).length;
+      if (named > 1 || (named === 1 && args[0] !== undefined)) {
+        throw new CliError(2, "bx wait takes one condition: <ms | selector | text>, --idle, --gone, --url or --js");
+      }
+      if (idle) {
+        return send<ActionResult>(g, { cmd: "wait", idle, timeoutMs }, (d) => formatAction("waited", "until idle", d));
+      }
+      if (gone !== undefined) {
+        return send<ActionResult>(g, { cmd: "wait", gone: parseTarget(gone, match), timeoutMs }, (d) =>
+          formatAction("waited", `until ${q(gone)} was gone`, d),
+        );
+      }
+      if (url !== undefined) {
+        return send<ActionResult>(g, { cmd: "wait", url, timeoutMs }, (d) =>
+          formatAction("waited", `for url ${q(url)}`, d),
+        );
+      }
+      if (js !== undefined) {
+        return send<ActionResult>(g, { cmd: "wait", js, timeoutMs }, (d) =>
+          formatAction("waited", `until js ${q(js)}`, d),
+        );
+      }
       const arg = args[0];
-      if (arg === undefined) throw new CliError(2, "usage: bx wait <ms | selector | text>");
+      if (arg === undefined) {
+        throw new CliError(
+          2,
+          "usage: bx wait <ms | selector | text> | --idle | --gone <target> | --url <part> | --js <expr>",
+        );
+      }
       const isMs = /^\d+$/.test(arg);
       const waitCmd: Cmd = isMs
         ? { cmd: "wait", ms: Number(arg) }
@@ -624,18 +722,20 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
 
     case "mouse": {
       const { target, where } = takeIn(args);
+      const act = takeActionOpts(args);
       const button = mouseButton(takeOption(args, "--button"));
       const usage = "usage: bx mouse <click|dblclick|move|down|up> <x> <y> [--in <target>]";
       const action = mouseAction(args[0]);
       const x = coord(args[1], usage);
       const y = coord(args[2], usage);
-      return send<ActionResult>(g, { cmd: "mouse", action, x, y, in: target, button }, (d) =>
+      return send<ActionResult>(g, { cmd: "mouse", action, x, y, in: target, button, ...act }, (d) =>
         formatAction(`mouse ${action}`, `at ${x},${y}${where}`, d),
       );
     }
 
     case "drag": {
       const { target, where } = takeIn(args);
+      const act = takeActionOpts(args);
       const rawSteps = takeOption(args, "--steps");
       const usage =
         "usage: bx drag <x1> <y1> <x2> <y2> [--in <target>] [--steps <n>]" +
@@ -653,30 +753,32 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
       const toY = coord(args[3], usage);
       return send<ActionResult>(
         g,
-        { cmd: "drag", fromX, fromY, toX, toY, in: target, steps, mode, holdMs, stepDelayMs },
+        { cmd: "drag", fromX, fromY, toX, toY, in: target, steps, mode, holdMs, stepDelayMs, ...act },
         (d) => formatAction("dragged", `${fromX},${fromY} → ${toX},${toY}${where}`, d),
       );
     }
 
     case "key": {
+      const act = takeActionOpts(args);
       const action = args[0];
       const key = args[1];
       if ((action !== "down" && action !== "up") || key === undefined) {
         throw new CliError(2, "usage: bx key <down|up> <key>");
       }
-      return send<ActionResult>(g, { cmd: "key", action, key }, (d) =>
+      return send<ActionResult>(g, { cmd: "key", action, key, ...act }, (d) =>
         formatAction(`key ${action}`, q(key), d),
       );
     }
 
     case "wheel": {
       const { target, where } = takeIn(args);
+      const act = takeActionOpts(args);
       const usage = "usage: bx wheel <deltaY> [x y] [--in <target>]";
       const deltaY = coord(args[0], usage);
       const hasPoint = args[1] !== undefined;
       const x = hasPoint ? coord(args[1], usage) : undefined;
       const y = hasPoint ? coord(args[2], usage) : undefined;
-      return send<ActionResult>(g, { cmd: "wheel", deltaY, x, y, in: target }, (d) =>
+      return send<ActionResult>(g, { cmd: "wheel", deltaY, x, y, in: target, ...act }, (d) =>
         formatAction("wheel", hasPoint ? `${deltaY} at ${x},${y}${where}` : String(deltaY), d),
       );
     }
@@ -706,33 +808,60 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
 
     case "snap": {
       const full = takeFlag(args, "--full");
+      const stable = takeFlag(args, "--stable");
+      const jpegFlag = takeFlag(args, "--jpeg");
+      const el = takeOption(args, "--el");
+      const rawQuality = takeOption(args, "--quality");
+      const quality = rawQuality === undefined ? undefined : Number(rawQuality);
+      if (quality !== undefined && (!Number.isInteger(quality) || quality < 1 || quality > 100)) {
+        throw new CliError(2, "--quality takes a whole number from 1 to 100");
+      }
       const raw = args[0];
+      // A .jpg path, --quality or --jpeg all mean JPEG.
+      const jpeg = jpegFlag || quality !== undefined || (raw !== undefined && /\.jpe?g$/i.test(raw));
       // Resolved here: the daemon's cwd is not the caller's.
-      const target = raw === undefined ? undefined : path.resolve(process.cwd(), raw);
-      return send<SnapResult>(g, { cmd: "snap", path: target, full }, (d) =>
+      const file = raw === undefined ? undefined : path.resolve(process.cwd(), raw);
+      const target = el === undefined ? undefined : parseTarget(el);
+      return send<SnapResult>(g, { cmd: "snap", path: file, full, stable, target, jpeg, quality }, (d) =>
         `saved ${d.path} (${d.width}x${d.height}, ${Math.max(1, Math.round(d.bytes / 1024))} KB)`,
       );
     }
 
     case "text": {
-      const selector = args[0];
-      return send<TextResult>(g, { cmd: "text", selector }, (d) =>
+      const timeoutMs = takeTimeout(args);
+      const md = takeFlag(args, "--md");
+      const match = takeMatch(args);
+      const raw = args[0];
+      const target = raw === undefined ? undefined : parseTarget(raw, match);
+      return send<TextResult>(g, { cmd: "text", target, md, timeoutMs }, (d) =>
         d.truncated ? `${d.text}\n…(truncated)` : d.text,
       );
     }
 
     case "console": {
       const all = takeFlag(args, "--all");
+      const allTabs = takeFlag(args, "--all-tabs");
       const filter = takeOption(args, "--filter");
-      return send<ConsoleEntry[]>(g, { cmd: "console", all, filter }, (d) =>
+      return send<ConsoleEntry[]>(g, { cmd: "console", all, filter, allTabs }, (d) =>
         renderEntries(d, formatConsoleEntry),
       );
     }
 
     case "net": {
+      if (args[0] === "body") {
+        const id = Number(args[1]);
+        if (args[1] === undefined || !Number.isInteger(id) || id < 0) {
+          throw new CliError(2, "usage: bx net body <id>");
+        }
+        return send<NetBodyResult>(g, { cmd: "netBody", id }, (d) =>
+          `${d.status} ${d.contentType} ${d.url}\n\n${d.body}${d.truncated ? "\n…(truncated)" : ""}`,
+        );
+      }
       const failed = takeFlag(args, "--failed");
+      const all = takeFlag(args, "--all");
+      const allTabs = takeFlag(args, "--all-tabs");
       const filter = takeOption(args, "--filter");
-      return send<NetEntry[]>(g, { cmd: "net", failed, filter }, (d) =>
+      return send<NetEntry[]>(g, { cmd: "net", failed, filter, all, allTabs }, (d) =>
         renderEntries(d, formatNetEntry),
       );
     }
@@ -745,11 +874,15 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
       );
     }
 
-    case "back":
-      return send<ActionResult>(g, { cmd: "back" }, (d) => formatAction("went back", "", d));
+    case "back": {
+      const act = takeActionOpts(args);
+      return send<ActionResult>(g, { cmd: "back", ...act }, (d) => formatAction("went back", "", d));
+    }
 
-    case "reload":
-      return send<ActionResult>(g, { cmd: "reload" }, (d) => formatAction("reloaded", "", d));
+    case "reload": {
+      const act = takeActionOpts(args);
+      return send<ActionResult>(g, { cmd: "reload", ...act }, (d) => formatAction("reloaded", "", d));
+    }
 
     case "tabs":
       return send<TabsResult>(g, { cmd: "tabs" }, (d) =>
