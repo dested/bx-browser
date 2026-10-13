@@ -221,9 +221,7 @@ export async function collectDebug(ctx: DebugContext, opts: { light?: boolean } 
   const cpu = process.cpuUsage();
   const loop = { mean: nsToMs(loopDelay.mean), p99: nsToMs(loopDelay.percentile(99)), max: nsToMs(loopDelay.max) };
   loopDelay.reset();
-  const readPages: (o: { light: boolean }) => Promise<Pick<DebugResult, "pages" | "internals">> =
-    ctx.session.debugInfo.bind(ctx.session);
-  const { pages, internals } = await readPages({ light: opts.light === true });
+  const { pages, internals } = await ctx.session.debugInfo({ light: opts.light === true });
   return {
     v: DEBUG_VERSION,
     profile: ctx.profile,
