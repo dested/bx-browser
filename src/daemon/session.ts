@@ -693,6 +693,13 @@ export class Session {
   private readonly openers = new WeakMap<Page, Page>();
   /** onNewPage's opener check per page; an action awaits it before reporting newTab. */
   private readonly activation = new WeakMap<Page, Promise<void>>();
+  /**
+   * bx's own pages (K7: recording's distill harness). Invisible to tabs,
+   * indexes, the active slot, popups, deltas and console/net capture.
+   */
+  private readonly internal = new WeakSet<Page>();
+  /** openInternalPage calls waiting for the context to announce their page. */
+  private readonly internalClaims: Array<(page: Page) => void> = [];
   private nextPageId = 1;
   private readonly pageIds = new WeakMap<Page, number>();
   /** Per-page title (S6): navigation events and settle() keep it current. */
@@ -729,7 +736,7 @@ export class Session {
 
   /** The active page, re-picked (newest page) when it closed or never was. */
   private activePage(): Page | undefined {
-    const pages = this.context?.pages() ?? [];
+    const pages = this.userPages();
     if (this.active && !this.active.isClosed() && pages.includes(this.active)) return this.active;
     const fallback = pages[pages.length - 1];
     this.setActive(fallback ?? null);
@@ -811,7 +818,7 @@ export class Session {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const context = await this.launch();
-        if (context.pages().length === 0) await context.newPage();
+        if (this.userPages(context).length === 0) await context.newPage();
         this.dead = false;
         this.lostBelow = lostBelow;
         this.setActive(null);
@@ -896,6 +903,19 @@ export class Session {
    * link (no opener to check). Actions report new tabs either way.
    */
   private onNewPage(page: Page): void {
+    // The context announces a page before newPage() resolves; openInternalPage
+    // queued its claim first, so its page is marked internal here, untracked.
+    const claim = this.internalClaims.shift();
+    if (claim) {
+      this.internal.add(page);
+      claim(page);
+      return;
+    }
+    this.adopt(page);
+  }
+
+  /** A page the operator or an agent can see: tracked, and a popup may take the active slot. */
+  private adopt(page: Page): void {
     this.track(page);
     // Read before activePage() could fall back to this very page.
     const activeNow = this.active && !this.active.isClosed() ? this.active : null;
@@ -941,7 +961,7 @@ export class Session {
 
   private async ensurePage(): Promise<Page> {
     const context = await this.ensureContext();
-    if (context.pages().length === 0) await context.newPage();
+    if (this.userPages(context).length === 0) await context.newPage();
     const page = this.activePage();
     if (!page) throw { code: "no_page", message: "no page available" };
     return page;
@@ -955,7 +975,7 @@ export class Session {
   private async pageFor(tab?: number): Promise<Page> {
     if (tab === undefined) return this.ensurePage();
     const context = await this.ensureContext();
-    const page = context.pages().find((p) => this.pageIds.get(p) === tab);
+    const page = this.userPages(context).find((p) => this.pageIds.get(p) === tab);
     if (!page) {
       if (tab < this.lostBelow) {
         throw { code: "no_page", message: `tab ${tab} was lost when the browser closed; open a new one` };
@@ -1000,7 +1020,7 @@ export class Session {
 
   /** Pure bookkeeping: the title comes from the cache, never from the page. */
   private pageInfo(page: Page): PageInfo {
-    const pages = this.context?.pages() ?? [];
+    const pages = this.userPages();
     const index = pages.indexOf(page);
     const id = this.pageId(page);
     return {
@@ -1122,7 +1142,7 @@ export class Session {
       if (read.focused !== null) delta.focused = read.focused;
     }
     for (const opened of o.created) {
-      if (opened.isClosed()) continue;
+      if (opened.isClosed() || this.internal.has(opened)) continue;
       // Settles whether O2 made it active, so PageInfo.active is right.
       await this.activation.get(opened);
       const opener = await opened.opener().catch(() => null);
@@ -2054,7 +2074,7 @@ export class Session {
 
   async tabs(): Promise<TabsResult> {
     const context = await this.ensureContext();
-    return { pages: context.pages().map((p) => this.pageInfo(p)) };
+    return { pages: this.userPages(context).map((p) => this.pageInfo(p)) };
   }
 
   /**
@@ -2098,7 +2118,7 @@ export class Session {
 
   async tabSelect(cmd: CmdOf<"tabSelect">): Promise<TabsResult> {
     const context = await this.ensureContext();
-    const page = context.pages()[cmd.index];
+    const page = this.userPages(context)[cmd.index];
     if (!page) throw { code: "bad_request", message: `no tab at index ${cmd.index}` };
     this.setActive(page);
     await page.bringToFront().catch(() => undefined);
@@ -2113,7 +2133,7 @@ export class Session {
     // nukes everything and leaves one fresh blank tab so the persistent context
     // (and the daemon) survives instead of the browser closing under us.
     if (cmd.scope !== undefined) {
-      const pages = context.pages();
+      const pages = this.userPages(context);
       const keep = cmd.scope === "others" ? (this.activePage() ?? pages[0]) : undefined;
       let closed = 0;
       for (const page of [...pages]) {
@@ -2121,8 +2141,8 @@ export class Session {
         await page.close().catch(() => undefined);
         closed++;
       }
-      if (context.pages().length === 0) await context.newPage();
-      this.setActive(keep ?? context.pages()[0] ?? null);
+      if (this.userPages(context).length === 0) await context.newPage();
+      this.setActive(keep ?? this.userPages(context)[0] ?? null);
       const what =
         cmd.scope === "others"
           ? `closed ${closed} other tab${closed === 1 ? "" : "s"}`
@@ -2132,7 +2152,7 @@ export class Session {
     }
 
     const page = await this.pageFor(cmd.tab);
-    const closed = context.pages().indexOf(page);
+    const closed = this.userPages(context).indexOf(page);
     // Closing another tab leaves the active page alone (it is held by
     // identity); closing the active one falls back via the close handler.
     await page.close();
@@ -2142,7 +2162,7 @@ export class Session {
 
   async status(): Promise<StatusResult> {
     const pages = this.context
-      ? this.context.pages().map((p) => this.pageInfo(p))
+      ? this.userPages().map((p) => this.pageInfo(p))
       : [];
     return {
       profile: this.profile,
@@ -2158,7 +2178,7 @@ export class Session {
   /** Pages with Chrome's counters, plus the sizes of everything this session keeps. */
   /** light: no per-page CDP session or Performance.getMetrics (metrics: null). */
   async debugInfo(opts: { light?: boolean } = {}): Promise<Pick<DebugResult, "pages" | "internals">> {
-    const pages = this.context?.pages() ?? [];
+    const pages = this.userPages();
     const out = await Promise.all(
       pages.map(async (page): Promise<DebugPage> => {
         const info = this.pageInfo(page);
@@ -2242,6 +2262,46 @@ export class Session {
   /** Wall-clock origin that `ActionLogEntry.t` is measured from. */
   get logTimeOrigin(): number {
     return this.buffers.t0;
+  }
+
+  /**
+   * K7: a page for bx's own work (recording's distill harness) that callers
+   * never see: no tab, index or id, never active or a newTab, no console/net
+   * capture. The operator's tab is brought back to the front, since Chrome
+   * foregrounds a new tab by itself. Close it with page.close() when done.
+   */
+  async openInternalPage(): Promise<Page> {
+    const context = await this.ensureContext();
+    const stay = this.activePage();
+    let claimed: Page | null = null;
+    const claim = (page: Page): void => {
+      claimed = page;
+    };
+    this.internalClaims.push(claim);
+    let page: Page;
+    try {
+      page = await context.newPage();
+    } finally {
+      const left = this.internalClaims.indexOf(claim);
+      if (left >= 0) this.internalClaims.splice(left, 1);
+    }
+    if (claimed !== page) {
+      // Another page (a popup) was announced first and took the claim: give
+      // it back, and hide ours, which was adopted as a tab in the meantime.
+      if (claimed !== null) {
+        this.internal.delete(claimed);
+        this.adopt(claimed);
+      }
+      this.internal.add(page);
+      if (this.active === page) this.setActive(stay ?? null);
+    }
+    if (stay && !stay.isClosed()) await stay.bringToFront().catch(() => undefined);
+    return page;
+  }
+
+  /** The context's pages minus internal ones: what tabs, indexes and the active slot see. */
+  private userPages(context: BrowserContext | null = this.context): Page[] {
+    return context ? context.pages().filter((p) => !this.internal.has(p)) : [];
   }
 
   /** Read-only view of a page's stable tab id (recording finds its tab by it). */
