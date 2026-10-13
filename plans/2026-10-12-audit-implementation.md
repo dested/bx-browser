@@ -205,6 +205,7 @@ All optional fields; the full text is in `G:\code\bx\src\protocol.ts` once lande
 - (2026-10-12, Sal) Wave 1 sample approved; phase 2 and beyond go. Applies to: all.
 - (2026-10-12, lead) Phase 2 protocol landed at 7b0db6f, with interim compat edits by the lead in session.ts (resolveTarget: testid/label direct, role → bad_request), debug.ts (targetText) and synthesize.ts (textOf). Owners keep or replace them. Applies to: core, infra, resolver.
 - (2026-10-12, lead) Don't delete your bx profiles (the hook blocks recursive deletes). Leave them; `bx gc` cleans them at the end. Stop your daemons (`bun G:/code/bx/src/cli.ts --profile <p> stop`) when done. Applies to: all.
+- (2026-10-12, lead) core queue gains G3-daemon after C6: `wheel` with `in` and no x/y scrolls the element into view (scrollIntoViewIfNeeded), then wheels deltaY only if ≠ 0; text `scrolled "<stable>" into view`. Contract in protocol.ts at c2c5734. Applies to: core, agentkit.
 - (2026-10-12, lead) Hand-offs that touch another owner's file go to the lead as exact replacement text in a scratch file (path in the message); the lead forwards to the owner. Applies to: resolver, infra, agentkit.
 
 ## Ledger (lead, updated 2026-10-12)
@@ -218,7 +219,7 @@ Board: down · Last pushed: b3dc301 (origin/main; local main ahead, unpushed) ·
 | resolver | opus-high | resolve.ts, distill.ts, tests/resolve.test.ts | C1 C2 C3 C8 S5 | — | running |
 | agentkit | opus-high | src/agent/**, src/bench/** | G1–G6 | — | running |
 | infra | opus-high | observe, debug, record, actionLog, orphans, maintenance, flows | O1 O5 D1 D3 D4 F1 F2 F3 R2 | — | running |
-| lead | — | cli, client, protocol, constants, script | R5 S2 S3 C7 A1-cli | aafd640 | done: CLI js 1 94→67 ms (bun floor 45), bx do 20 cmds 105 ms |
+| lead | — | cli, client, protocol, constants, script | phase 2 CLI flags; agentkit handoff-1 | 75d1d16, c2c5734 | done; next: doctor/gc wiring, resolver/observe forwards |
 
 Live tool: global bx → G:/code/bx-live (a80f037), relinked by Sal 2026-10-12.
 Background jobs: none
