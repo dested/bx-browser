@@ -36,6 +36,7 @@ import {
 import { ACTION_LOG_CAP, ActionLog } from "./actionLog.ts";
 import { distillPage, renderEls, type DistillResult } from "./distill.ts";
 import { seedOsPasswordCheck } from "./osPassword.ts";
+import { jsProgram } from "./serialize.ts";
 import {
   RingBuffer,
   attachObservers,
@@ -980,24 +981,32 @@ export class Session {
 
   async js(cmd: CmdOf<"js">): Promise<JsResult> {
     const page = await this.pageFor(cmd.tab);
-    const source = `(async () => (${cmd.expression}))()`;
-    let value: unknown;
+    // Statements are fine too: the last expression statement is the result.
+    const source = jsProgram(cmd.expression, BUDGET.JS_MAX_CHARS);
+    let out: unknown;
     try {
       step("evaluate");
-      value = await page.evaluate<unknown>(source);
+      out = await page.evaluate<unknown>(source);
     } catch (err) {
       // A redirect replaced the document under us; run once on the new one.
       if (!CONTEXT_GONE.test(errorMessage(err))) throw err;
+      step("wait for load");
       await page.waitForLoadState("load", { timeout: 5000 }).catch(() => undefined);
       step("evaluate on the new document");
-      value = await page.evaluate<unknown>(source);
+      out = await page.evaluate<unknown>(source);
     }
-    const serialized = value === undefined ? "undefined" : (JSON.stringify(value) ?? "undefined");
-    const truncated = serialized.length > BUDGET.JS_MAX_CHARS;
-    return {
-      value: truncated ? serialized.slice(0, BUDGET.JS_MAX_CHARS) : serialized,
-      truncated,
-    };
+    if (
+      typeof out !== "object" ||
+      out === null ||
+      !("json" in out) ||
+      typeof out.json !== "string" ||
+      !("truncated" in out) ||
+      typeof out.truncated !== "boolean"
+    ) {
+      // The page replaced a builtin the serializer leans on.
+      throw { code: "internal", message: "js: the page returned no serialized result" };
+    }
+    return { value: out.json, truncated: out.truncated };
   }
 
   /**
