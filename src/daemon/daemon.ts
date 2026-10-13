@@ -33,7 +33,17 @@ import {
   type RunFile,
 } from "../protocol.ts";
 import { Session, steps } from "./session.ts";
-import { harnessRoutes, recordStart, recordStop, recordingSlug } from "./record.ts";
+import {
+  harnessRoutes,
+  recordBusy,
+  recordDistill,
+  recordMark,
+  recordSave,
+  recordStart,
+  recordStatus,
+  recordStop,
+  recordingSlug,
+} from "./record.ts";
 import { collectDebug, heapSnapshot, Journal, parseClientTag, runGc } from "./debug.ts";
 import { pruneSnaps, snapDays } from "./orphans.ts";
 import { serveArgv } from "../argv/serve.ts";
@@ -146,10 +156,12 @@ const DEADLINE_MAX_MS = 600_000;
  * How long a command may run (R3), or null for none. The header (default 10 s,
  * clamped) is raised to cover a command's own timeout so an explicit
  * `--timeout 20000` wait isn't cut off at 10 s; drive gets its own budget and
- * recordings are exempt (a relaunch plus ffmpeg can take a while).
+ * the recording commands that encode are exempt: stop (a ring encodes its
+ * frames there, --mp4 transcodes), save and distill can take minutes. Start,
+ * mark and status keep the default: start is a CDP call plus one frame.
  */
 function deadlineFor(cmd: Cmd, header: string | string[] | undefined): number | null {
-  if (cmd.cmd === "recordStart" || cmd.cmd === "recordStop") return null;
+  if (cmd.cmd === "recordStop" || cmd.cmd === "recordSave" || cmd.cmd === "recordDistill") return null;
   if (cmd.cmd === "drive") return (cmd.timeoutMs ?? 15000) + 5000;
   const raw = Number(Array.isArray(header) ? header[0] : header);
   const asked = Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_DEADLINE_MS;
@@ -248,9 +260,17 @@ async function dispatch(cmd: Cmd): Promise<unknown> {
     case "tabClose":
       return session.tabClose(cmd);
     case "recordStart":
-      return recordStart(session, cmd.slug);
+      return recordStart(session, cmd.slug, cmd);
     case "recordStop":
-      return recordStop(session, cmd.outDir);
+      return recordStop(session, cmd.outDir, cmd);
+    case "recordMark":
+      return recordMark(session, cmd.text);
+    case "recordSave":
+      return recordSave(session, cmd);
+    case "recordStatus":
+      return recordStatus();
+    case "recordDistill":
+      return recordDistill(session, cmd.dir);
     case "status":
       return session.status();
     case "actionLog":
@@ -468,7 +488,8 @@ function idleLimitMs(): number {
 const idleLimit = idleLimitMs();
 if (idleLimit > 0) {
   setInterval(() => {
-    if (journal.inFlightCount > 0 || recordingSlug() !== null) return;
+    // A background distill holds the daemon too: exiting would orphan report.md.
+    if (journal.inFlightCount > 0 || recordBusy()) return;
     if (Date.now() - lastActivity >= idleLimit) {
       void shutdown(`idle for ${idleLimit / 60_000} min`);
     }
