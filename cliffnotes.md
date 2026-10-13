@@ -1,6 +1,6 @@
 # bx — cliffnotes
 
-Last updated: 2026-10-08
+Last updated: 2026-10-12
 
 Purpose-built browser automation for Claude Code. A per-profile **daemon**
 (runs under **Node** — not Bun; see decisions.md) holds one real Chrome via
@@ -12,16 +12,24 @@ talk to it over localhost HTTP. Everything is token-budgeted at the source.
 ```
 src/
   protocol.ts        THE contract: Cmd union, results, budgets, targets, agent types
-  cli.ts             bx entry — arg parsing, dispatch, human output, exit codes
-  client.ts          daemon discovery/spawn (node, detached), cmd<T>(), parseTarget
+  constants.ts       dirs, headers, DEFAULT_DEADLINE_MS — zod-free so the CLI imports it cheaply
+  cli.ts             bx entry — arg parsing, dispatch, human output, exit codes, `bx -`/`bx do` batch
+  client.ts          daemon discovery/spawn (node, detached), cmd<T>() fast path, parseTarget, formatAction
+  script.ts          batch splitting: splitScript / splitWords (shell-style quoting)
+  maintenance.ts     bx doctor / bx gc (Bun side; dry run unless --fix / --yes; never follows links)
   daemon/            ⚠ Node runtime: no Bun.*, no non-erasable TS syntax
     daemon.ts        node:http server, routes (/health /cmd /debug* /shutdown /fixture /harness*)
-    session.ts       browser lifecycle, target resolution, action log, ref registry, debugInfo (per-page CDP metrics)
+    session.ts       browser lifecycle + self-heal relaunch, every command, adaptive settle,
+                     action deltas, active tab by identity, step() labels for deadlines
+    resolve.ts       target resolution: identity refs (in-page window.__bx), one ranked pass,
+                     ambiguous ties, visible-only; scanEls for els/open/then
+    serialize.ts     js: statements-or-expression wrapping + in-page JSON serializer
+    orphans.ts       orphan Chrome per profile, profile-lock clearing, snap pruning
     actionLog.ts     the action log, capped at the newest 1000 entries; absolute indexes, held during a recording
     debug.ts         /debug: Journal of every /cmd (in flight, last 200, totals, clients), process + loop counters, gc, heap snapshot
     hideWindows.ts   forces windowsHide on every child_process.spawn (imported first; stops ffmpeg console windows)
-    distill.ts       els: DOM scan → numbered elements, budget-capped rendering
-    observe.ts       console/net ring buffers, per-action error marks
+    distill.ts       els in-page scan: shadow DOM, same-origin iframes, modals, --diff, --clickables
+    observe.ts       console/net circular buffers tagged by tab, net ids + netBody, per-action error marks
     osPassword.ts    pre-launch seed of Chrome's OS blank-password cache (stops failed Windows logons)
     record.ts        recording: video relaunch cycle + harness orchestration
     harness/harness.ts  browser-side: runs video-to-prompt distill() in-page
@@ -31,9 +39,12 @@ src/
     synthesize.ts    action log → flow file (replay-stable targets, no refs)
   agent/
     tools.ts         bx verbs as Agent SDK MCP tools (text in, text out)
-    driver.ts        runAgent: haiku→sonnet(→opus opt-in) ladder, governance
-                     (--budget/--max-wall/stall), --url/--enter/--win, --save
-  bench/bench.ts     bun run bench [--agent] → bench-results.json
+    driver.ts        runAgent: haiku→sonnet(→opus opt-in) ladder, escalates only on a
+                     fail report or stall; governance (--budget/--max-wall/stall), --vision
+    pricing.ts       model ids + dated price table (est=$); the SDK's own table lags
+  bench/bench.ts     bun run bench [--agent | --agent-suite] → bench-results.json
+  bench/agentSuite.ts  12 hidden-checked agent tasks → bench-agent-results.json
+  bench/pages/       bench-only pages (modal, select, popup, filter, scroll, help)
 fixtures/app/        "TaskBox" test app served by the daemon at /fixture
 flows/examples/      canonical user-facing flow examples
 skill/SKILL.md       the Claude Code skill (installed via `bx install-skill`)
@@ -42,6 +53,11 @@ tests/smoke.test.ts  live daemon suite (bun test), profile "bxtest"
 tests/flows.test.ts  synthesis + bx/flow-alias unit tests (no browser)
 tests/record.test.ts recording tab-selection unit tests (no browser)
 tests/actionLog.test.ts  action-log cap: absolute indexes across trims, recording hold (no browser)
+tests/resolve.test.ts    resolver scenarios in a real headless Chrome (re-runs itself under Node)
+tests/serialize.test.ts  js wrapping + serializer (no browser)
+tests/observe.test.ts    ring wrap, tab filter, net entry lifecycle (no browser)
+tests/maintenance.test.ts  doctor/gc incl. junction safety (no browser)
+tests/script.test.ts, tests/target.test.ts  batch splitting, parseTarget (no browser)
 site/                bx.dested.com landing — plain "no-slop" HTML: App.tsx is one
                      self-contained semantic doc + ~40-line index.css (no Tailwind,
                      no demos). Vite+React shell only.
@@ -54,7 +70,10 @@ Dockerfile, drydock.yaml, .github/  DRYDOCK-MANAGED (portal regenerates — don'
 | --- | --- |
 | A command's wire shape / add a verb | protocol.ts, then session.ts (impl), cli.ts (parse+print), skill/SKILL.md |
 | Element list contents/format | daemon/distill.ts |
-| Target matching order | daemon/session.ts resolveTarget + protocol.ts comment |
+| Target matching order | daemon/resolve.ts + the Targets comment in protocol.ts |
+| Post-action settle / deltas | daemon/session.ts settle(), runAction |
+| Cleanup (orphans, locks, disk) | daemon/orphans.ts, maintenance.ts |
+| Agent prices / model ids | agent/pricing.ts (bump PRICES_CHECKED) |
 | Output budgets | protocol.ts BUDGET |
 | Agent behavior/system prompt | agent/driver.ts |
 | Flow verbs | flows/api.ts (+ synthesize.ts mapping) |
@@ -74,10 +93,23 @@ Dockerfile, drydock.yaml, .github/  DRYDOCK-MANAGED (portal regenerates — don'
 - `cmd<T>` trusts the daemon's payload shape — compile-time contract only. If a
   session.ts return shape changes, agent/tools.ts and cli.ts break at runtime
   with no tsc error. Change protocol.ts first, then grep call sites.
-- Refs go stale on navigation and els scans — by design, and per-tab: each page
-  has its own registry/generation (`refsFor(page)`). Flows/synthesis never use
-  refs. Commands honor the optional `tab` pin (stable page id); every agent run
-  is pinned to its own tab — that is the concurrency guarantee.
+- Refs are element identities (daemon/resolve.ts, in-page `window.__bx`): they
+  survive els scans and go stale only when the element leaves the page; numbers
+  grow per tab and are never reused. Resolution marks the winner
+  `data-bx-ref="<id>"` (visible in the DOM; the 16 newest marks are kept per
+  document). Flows/synthesis never use refs. Commands honor the optional `tab`
+  pin (stable page id); every agent run is pinned to its own tab — that is the
+  concurrency guarantee. A pinned console/net sees only its own tab.
+- The active tab is held by Page identity, not index: a popup becomes active
+  only when the active tab opened it; anything else opens in the background and
+  the action's delta reports `newTab`.
+- Every command runs under a daemon deadline (header `x-bx-deadline-ms`, default
+  10 s, raised to timeoutMs + 5 s). A busy page answers `deadline … during <step>`
+  instead of hanging; the abandoned work's result is discarded.
+- The CLI posts straight to the run file's port and only spawns a daemon when
+  the connection is refused — a request that reached a daemon is never resent.
+- A dead browser is relaunched on the next command (`relaunched: true`,
+  `status.relaunches`); its old tab ids answer `no_page … lost`.
 - New session command handlers: `runAction(cmd, cmd.tab, perform)` +
   `pageFor(cmd.tab)` — never `ensurePage()` directly.
 - `bx run`'s "bx/flow" alias rewrites the ENTRY flow file only (Bun onLoad
