@@ -30,14 +30,14 @@ bx agent "log in as demo@acme.test and verify the invoice list loads" --save inv
   `tier=haiku turns=6 wall=25.9s est=$0.0021 sdk=$0.1034` — quote it when reporting.
 - Quote `est=$`, always: it is the dated price table in `src/agent/pricing.ts`
   applied to metered tokens, and includes an aborted rung's spend. `sdk=$` is the
-  Agent SDK's own price table, ~50× high for Haiku 5.5 until the SDK catches up.
+  Agent SDK's own price table, which has lagged new models — don't quote it.
 - `--opus` allows one FINAL escalation Sonnet → Opus 5.5. Complex flows only
-  (long multi-page journeys, gnarly canvas work) — ~2× Sonnet cost. Don't pass
+  (long multi-page journeys, gnarly canvas work) — ~2.5× Sonnet cost. Don't pass
   it by default; add it when a Sonnet attempt already failed on a task that
   genuinely needs the extra reasoning. `--model opus` runs Opus directly.
 - Measured (bench suite, 2026-10-12): Haiku 5.5 passed 12/12, median 7.5
-  turns (p90 9), ~15s, ~$0.002 per task at list price; Sonnet 5.5 also 12/12 at
-  ~$0.04. Canvas and drive tasks run ~140s — raise the budget with
+  turns (p90 9), ~15s, ~$0.002 per task at list price; Sonnet 5.5 12/12 at
+  ~$0.04; Opus 5.5 12/12 at ~$0.09. Canvas and drive tasks run ~140s — raise the budget with
   `--max-turns 60` for multi-step game work.
 - Every run writes a full turn-by-turn transcript to `~/.bx/agent-runs/` (path
   in the trailer); `--verbose` streams it live to stderr; a heartbeat line
@@ -72,13 +72,23 @@ bx fill 5 "me@example.com"
 bx expect text "Saved"               # exit 1 if it fails
 ```
 
-Refs are per-scan and go stale by design: after navigation, re-run `bx els` —
-or pass text (`bx click "Save changes"`), which survives re-renders.
+A ref names the element itself: it survives later `els` scans and goes stale
+(`stale_ref`) only when that element leaves the page, e.g. after navigation.
+Text targets (`bx click "Save changes"`) survive re-renders too.
 
-**Target syntax** (auto-detected): `3` → ref from the last `els`; `#id`,
-`.class`, `[attr]`, `//xpath`, `css=`, `xpath=` → selector; anything else →
-text, matched against `data-testid`, role+name, label, placeholder, visible
-text — in that order.
+**Target syntax** (auto-detected): `@3` → ref (a bare `3` is a ref when that ref
+exists, otherwise text); `#id`, `.class`, `[attr]`, `//xpath`, `css=`, `xpath=`
+→ selector; `text:`, `testid:`, `label:`, `role:<role>[:<name>]` force a kind;
+anything else → text. Only visible elements match. The best match wins (exact
+name > exact text > prefix > substring); a **tie answers `ambiguous` with the
+candidates as refs** — pick one with `@N`, or pass `--first` / `--exact`. With
+a modal open, matching is scoped to the modal.
+
+**Every action reports what changed** — url, title, dialog, alerts, `dom +N −M`,
+focus, a new background tab — so you rarely need a follow-up `els`. Chain the
+look into the same call with `--then els|text|snap`, or wait for the outcome
+with `--until "<text>"`. Actions settle adaptively (DOM + the action's requests
+go quiet, capped at 1s); `--settle 0` skips it.
 
 | Verb | Syntax | Notes |
 | --- | --- | --- |
@@ -86,21 +96,32 @@ text — in that order.
 | els | `bx els [--all] [--filter <text>]` | numbered interactive elements |
 | click / fill / select | `bx click <target>` · `bx fill <t> <v>` · `bx select <t> <v>` | auto-wait |
 | press | `bx press <key>` | one-shot key/chord: `Enter`, `Control+a` |
-| wait | `bx wait <text\|selector\|ms>` | number = sleep, else wait visible |
+| wait | `bx wait <text\|selector\|ms>` · `--idle` · `--gone <t>` · `--url <part>` · `--js <expr>` | number = sleep, else wait visible |
 | expect | `bx expect text\|url\|visible\|not-visible <value>` | exit 1 on fail; `--timeout <ms>` |
-| text / js | `bx text [selector]` · `bx js <expr>` | budgeted reads |
-| console / net | `bx console [--filter <re>]` · `bx net --failed` | errors first |
-| snap | `bx snap [path] [--full]` | downscaled PNG path — `Read` it only if needed |
+| els | `bx els --diff` · `bx els --clickables` | only what changed · include cursor:pointer divs |
+| text / js | `bx text [target] [--md]` · `bx js <code \| - \| @file.js>` | budgeted reads; js takes statements, last expression is the result |
+| console / net | `bx console [--filter <re>]` · `bx net --failed` · `bx net body <id>` | errors first; a pinned agent sees only its tab (`--all-tabs` for every tab) |
+| snap | `bx snap [path] [--full] [--el <target>] [--jpeg]` | downscaled image path — `Read` it only if needed |
 | tabs | `bx tabs` · `bx tab <n>` · `bx tab new [url]` · `bx tab close [--others\|--all]` | `--others` keeps the active tab, `--all` closes every tab — clean up when done |
 | run | `bx run <flow.ts> [--record]` | replay a flow; zero model tokens |
 | drive | `bx drive --install "<js>" --until "<expr>" [--timeout <ms>] [--poll <ms>]` | in-page controller + poll; exit 1 on timeout |
 | agent | `bx agent "<task>" [--model haiku\|sonnet\|opus] [--opus] [--save <n>] [--max-turns <n>] [--budget <usd>] [--max-wall <s>] [--url <u>] [--enter <js>] [--win <expr>] [--verbose]` | delegate |
-| record | `bx record start <slug>` / `bx record stop` | video → narrated package |
+| record | `bx record start [slug] [--follow\|--tab <id>] [--ring <s>]` · `mark "<t>"` · `stop [--distill] [--mp4]` · `save --last <s>` · `status` | see "Record a walkthrough" |
+| batch | `bx do "click Save; expect text Saved"` · `bx -` (stdin, one per line) | one process, ~1–3 ms per command after the first; stops at the first failure |
 | admin | `bx status` / `bx profiles` / `bx stop [--all]` | daemon lifecycle; idle daemons exit after 15 min |
+| upkeep | `bx doctor [--fix]` · `bx gc [--older-than 14d] [--caches] [--yes]` | orphaned Chromes, stale locks, old profiles; dry run unless `--fix` / `--yes` |
 
 Global flags: `--profile <name>` (default `default`), `--headless`, `--json`
-(includes an `ms` timing field), `--timeout <ms>`. `BX_TIMING=1` prints wall
-time to stderr per command. The daemon starts on first use, one per profile.
+(includes an `ms` timing field), `--timeout <ms>`, `--deadline <ms>`.
+`BX_TIMING=1` prints wall time to stderr per command. The daemon starts on
+first use, one per profile. Every command runs under a deadline (10s, or
+`--timeout` + 5s): a page stuck in a busy loop answers `deadline … during
+<step>` instead of hanging. A crashed browser relaunches on the next command
+(old tab ids then answer `no_page`).
+
+On Windows, `bx` may be `bx.exe`, a native front door that answers in ~25 ms
+and prints exactly what the Bun CLI would; commands it can't serve (stdin,
+`agent`, `run`, `gc`…) hand off to Bun transparently. Nothing changes for you.
 
 ## Clean up when you're done
 
@@ -210,20 +231,28 @@ bx net --failed                  # 4xx/5xx/aborted
 ## Record a walkthrough
 
 ```bash
-bx record start checkout-bug
-# …drive, or bx run flows/checkout.flow.ts --record…
-bx record stop
+bx record start checkout-bug --follow   # ~150 ms; the browser is NOT restarted
+# …drive, or: bx run flows/checkout.flow.ts --record
+bx record mark "total jumps here"        # chapter marker in transcript + report
+bx record stop                           # ~120 ms; report.md builds in the background
+bx record status                         # lists packages still distilling
 ```
 
-Produces `recordings/<slug>/`: deduped keyframes, 3×3 contact sheets, and a
-`report.md` narrated by the action log (passwords redacted). Point the user at
-`report.md`.
+Captures ONE tab: the active tab at start, `--tab <id>` for a specific one, or
+`--follow` to move with whichever tab becomes active (tab select, popups).
+Tabs, typed values and logins survive start and stop. Produces
+`recordings/<slug>/`: `video.webm`, `transcript.txt` (the action log + marks,
+timestamped; passwords redacted), `recording.json`, and — a second or two after
+stop — `report.md` with deduped keyframes and 3×3 contact sheets. Point the
+user at `report.md`; `bx record stop --distill` waits for it, `--mp4` adds an
+mp4 (needs ffmpeg with libx264).
 
-Recording follows the **driven tab**, not whichever tab is on screen — with
-several tabs open (e.g. a `bx agent` running in its own pinned tab) the captured
-video is the tab that received the actions, selected by action activity rather
-than file size. If the driven tab's video is somehow lost, `bx record stop`
-errors loudly instead of shipping a blank video from an idle tab.
+Something just went wrong and you weren't recording? Keep a rolling buffer:
+
+```bash
+bx record start --ring 60       # newest 60s in memory, nothing written
+bx record save --last 30        # package the last 30s; capture keeps going
+```
 
 ## Artifacts
 
@@ -259,4 +288,5 @@ errors loudly instead of shipping a blank video from an idle tab.
   coordinates or instrument the app.
 
 Install: `bun add -g bx-browser && bx install-skill` (from a checkout:
-`bun link`, then `bx install-skill`).
+`bun link`, then `bx install-skill`). Windows front door: `bun run
+build:frontdoor` → `dist/bx.exe`, put `dist` first on PATH.
