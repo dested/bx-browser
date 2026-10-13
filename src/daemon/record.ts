@@ -1,93 +1,71 @@
-// Recording: Playwright captures video across a relaunch cycle, then the webm
-// is distilled into an agent-ready package by video-to-prompt running inside
-// the browser bx already controls (the library is browser-only by design).
-//
-// bx's action log stands in for narration — the recording has no audio track,
-// so "clicked Save changes" becomes the timed transcript and the report reads
-// as a narrated walkthrough.
+// Recording (V1): one tab captured over CDP Page.startScreencast and piped
+// into our own ffmpeg (see screencast.ts). No context relaunch, so start and
+// stop answer in milliseconds and tabs, typed values and page ids survive.
+// The package is video.webm (written once), transcript.txt (the action log
+// plus marks, timed against the video) and recording.json; report.md comes
+// from video-to-prompt's distill running inside the browser bx already
+// controls (the library is browser-only by design).
 //
 // Runtime-neutral (node:* only): the daemon runs under Node, so the harness
 // bundle is built by shelling out to `bun scripts/build-harness.ts`.
 
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { copyFile, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { BX_DIR_NAME, RUN_DIR, type RecordStartResult, type RecordStopResult } from "../protocol.ts";
+import type { Page } from "playwright-core";
+import {
+  BX_DIR_NAME,
+  RUN_DIR,
+  type ActionLogEntry,
+  type Cmd,
+  type RecordStartResult,
+  type RecordStopResult,
+} from "../protocol.ts";
+import { OUTPUT_FPS, PageScreencast, Vp8Encoder, findPlaywrightFfmpeg, type Frame } from "./screencast.ts";
 import type { Session } from "./session.ts";
+
+type CmdOf<K extends Cmd["cmd"]> = Extract<Cmd, { cmd: K }>;
+export type RecordStartOptions = Omit<CmdOf<"recordStart">, "cmd" | "slug">;
+export type RecordStopOptions = Omit<CmdOf<"recordStop">, "cmd" | "outDir">;
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../..");
 const HARNESS_SRC = path.join(repoRoot, "src", "daemon", "harness", "harness.ts");
 const HARNESS_BUNDLE = path.join(repoRoot, "dist", "harness.js");
 
-const VIDEO_SIZE = { width: 1280, height: 800 };
-const DISTILL_TIMEOUT_MS = 180_000;
+const DEFAULT_SIZE = { width: 1280, height: 800 };
+const FIRST_FRAME_MS = 1000;
 
-interface RecordingState {
+interface Mark {
+  /** ms from the video's first frame */
+  atMs: number;
+  text: string;
+}
+
+interface Recording {
   slug: string;
-  startedAtMs: number;
+  tab: number;
+  fps: 30 | 60;
+  /** Date.now() at recordStart. */
+  requestedAt: number;
+  /** Date.now() when the first frame arrived: the video's zero. */
+  zeroAt: number;
   actionLogStartIndex: number;
-  videoTmpDir: string;
+  capture: PageScreencast;
+  encoder: Vp8Encoder;
+  tmpDir: string;
+  /** Screencast frames received, ms from zero. */
+  frameTimes: number[];
+  marks: Mark[];
+  onClose: () => void;
 }
 
 /** One recording at a time — the daemon owns a single browser context. */
-let state: RecordingState | null = null;
-
-// ---------------------------------------------------------------------------
-// Tab selection (pure — unit-tested in tests/record.test.ts)
-// ---------------------------------------------------------------------------
-
-/** A page's flushed webm, tagged with the tab id that produced it. */
-export interface VideoCandidate {
-  tab: number;
-  file: string;
-  bytes: number;
-}
-
-/**
- * Which tab's video to ship. Playwright's recordVideo writes one webm per page
- * in the context; picking the largest file silently loses to a looping
- * animation on an idle tab (that encodes bigger than a busy tab of static
- * pages). Select by ACTION ACTIVITY instead — the tab that saw the most log
- * entries — and let bytes break ties only for a passive, action-free recording.
- */
-export type VideoSelection =
-  | { ok: true; source: VideoCandidate; actions: number }
-  | { ok: false; reason: "no-video" }
-  | { ok: false; reason: "wrong-tab"; drivenActions: number };
-
-/** Tally action-log entries per acting tab; entries with no page are ignored. */
-export function tallyActionsByTab(entries: readonly { tab?: number }[]): Map<number, number> {
-  const byTab = new Map<number, number>();
-  for (const entry of entries) {
-    if (entry.tab === undefined) continue;
-    byTab.set(entry.tab, (byTab.get(entry.tab) ?? 0) + 1);
-  }
-  return byTab;
-}
-
-export function selectRecordedVideo(
-  candidates: readonly VideoCandidate[],
-  actionsByTab: Map<number, number>,
-): VideoSelection {
-  const scored = candidates.map((c) => ({ ...c, actions: actionsByTab.get(c.tab) ?? 0 }));
-  scored.sort((a, b) => b.actions - a.actions || b.bytes - a.bytes);
-  const source = scored[0];
-  if (!source || source.bytes === 0) return { ok: false, reason: "no-video" };
-
-  // Loud guard: some tab WAS driven this recording, yet the winning video's tab
-  // saw zero actions — the driven tab's video is missing, so a passive tab won.
-  // Fail rather than silently ship a blank/idle video (the byte-heuristic bug).
-  if (actionsByTab.size > 0 && source.actions === 0) {
-    let drivenActions = 0;
-    for (const n of actionsByTab.values()) drivenActions += n;
-    return { ok: false, reason: "wrong-tab", drivenActions };
-  }
-  return { ok: true, source, actions: source.actions };
-}
+let state: Recording | null = null;
+/** Set while recordStart is between its first await and `state`. */
+let starting = false;
 
 export function recordingSlug(): string | null {
   return state?.slug ?? null;
@@ -95,6 +73,47 @@ export function recordingSlug(): string | null {
 
 /** Keyed by full pathname (e.g. "/harness", "/harness/video"). */
 export const harnessRoutes: Record<string, (req: Request) => Promise<Response>> = {};
+
+// ---------------------------------------------------------------------------
+// Transcript (pure — unit-tested in tests/record.test.ts)
+// ---------------------------------------------------------------------------
+
+/** mm:ss.mmm (minutes keep counting past 59). */
+export function formatOffset(ms: number): string {
+  const clamped = Math.max(0, Math.round(ms));
+  const minutes = Math.floor(clamped / 60_000);
+  const seconds = Math.floor((clamped % 60_000) / 1000);
+  const millis = clamped % 1000;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(millis).padStart(3, "0")}`;
+}
+
+export interface TranscriptLine {
+  /** ms from the video's first frame (never negative) */
+  t: number;
+  text: string;
+}
+
+/**
+ * Action-log entries (and marks, already in the log as recordMark) as offsets
+ * into the video. `origin` is the wall time `entry.t` counts from; `zeroAt`
+ * is the wall time of the video's first frame.
+ */
+export function transcriptLines(
+  entries: readonly Pick<ActionLogEntry, "t" | "text" | "cmd">[],
+  origin: number,
+  zeroAt: number,
+): TranscriptLine[] {
+  return entries.map((entry) => ({
+    t: Math.max(0, origin + entry.t - zeroAt),
+    text: entry.cmd === "recordMark" ? `— mark: ${entry.text}` : entry.text,
+  }));
+}
+
+export function transcriptText(slug: string, lines: readonly TranscriptLine[]): string {
+  const head = `# ${slug} — action log (bx commands, timed against video.webm)\n`;
+  if (lines.length === 0) return `${head}(no actions)\n`;
+  return head + lines.map((line) => `[${formatOffset(line.t)}] ${line.text}`).join("\n") + "\n";
+}
 
 // ---------------------------------------------------------------------------
 // Process helpers
@@ -132,45 +151,26 @@ function log(msg: string): void {
 }
 
 // ---------------------------------------------------------------------------
-// ffmpeg — playwright-core with channel:chrome does not ship it, but
-// recordVideo needs it.
+// ffmpeg — playwright-core with channel:chrome does not ship it.
 // ---------------------------------------------------------------------------
 
-function playwrightCacheDirs(): string[] {
-  const configured = process.env.PLAYWRIGHT_BROWSERS_PATH;
-  if (configured !== undefined && configured !== "" && configured !== "0") return [configured];
-  const home = os.homedir();
-  return [
-    path.join(home, "AppData", "Local", "ms-playwright"),
-    path.join(home, "Library", "Caches", "ms-playwright"),
-    path.join(home, ".cache", "ms-playwright"),
-  ];
-}
+let ffmpegPath: string | null = null;
 
-async function hasFfmpeg(): Promise<boolean> {
-  for (const dir of playwrightCacheDirs()) {
-    let entries;
-    try {
-      entries = await readdir(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    if (entries.some((entry) => entry.isDirectory() && entry.name.startsWith("ffmpeg"))) return true;
-  }
-  return false;
-}
-
-async function ensureFfmpeg(): Promise<void> {
-  if (await hasFfmpeg()) return;
+async function ensureFfmpeg(): Promise<string> {
+  if (ffmpegPath !== null) return ffmpegPath;
+  const found = await findPlaywrightFfmpeg();
+  if (found !== null) return (ffmpegPath = found);
   log("playwright ffmpeg missing — installing (needed for video capture)");
   const result = await runCommand("bun", ["x", "playwright-core", "install", "ffmpeg"], repoRoot);
-  if (result.code !== 0 || !(await hasFfmpeg())) {
+  const installed = result.code === 0 ? await findPlaywrightFfmpeg() : null;
+  if (installed === null) {
     throw {
       code: "internal",
       message: "recording needs playwright's ffmpeg — run: bun x playwright-core install ffmpeg",
     };
   }
   log("ffmpeg installed");
+  return (ffmpegPath = installed);
 }
 
 // ---------------------------------------------------------------------------
@@ -231,45 +231,6 @@ export function requireNonce(
   };
 }
 
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json; charset=utf-8" },
-  });
-}
-
-/**
- * The harness names its own output paths; keep them inside the package dir.
- * Rejects absolute paths, drive letters and any `..` segment.
- */
-function safeJoin(root: string, rel: string): string | null {
-  if (rel === "" || path.isAbsolute(rel) || /^[a-zA-Z]:/.test(rel)) return null;
-  const normalized = path.normalize(rel);
-  if (normalized.split(/[\\/]/).includes("..")) return null;
-  // Both sides must be resolved before comparing: callers pass forward-slash
-  // paths on Windows, which would never prefix-match a resolved path.
-  const base = path.resolve(root);
-  const full = path.resolve(base, normalized);
-  if (full !== base && !full.startsWith(base + path.sep)) return null;
-  return full;
-}
-
-function parseResultBody(value: unknown): { path: string; base64: string } | null {
-  if (typeof value !== "object" || value === null) return null;
-  if (!("path" in value) || !("base64" in value)) return null;
-  const { path: rel, base64 } = value;
-  if (typeof rel !== "string" || typeof base64 !== "string") return null;
-  return { path: rel, base64 };
-}
-
-function messageOf(value: unknown): string {
-  if (typeof value === "object" && value !== null && "message" in value) {
-    const { message } = value;
-    if (typeof message === "string") return message;
-  }
-  return "unknown harness error";
-}
-
 // ---------------------------------------------------------------------------
 // Daemon port (the harness page fetches over HTTP, so it needs the real port)
 // ---------------------------------------------------------------------------
@@ -288,199 +249,200 @@ async function daemonPort(profile: string): Promise<number> {
 // Public surface
 // ---------------------------------------------------------------------------
 
-export async function recordStart(session: Session, slug: string): Promise<RecordStartResult> {
-  if (state) throw { code: "already_recording", message: `already recording "${state.slug}"` };
-
-  await ensureFfmpeg();
-
-  const videoTmpDir = path.join(
-    os.homedir(),
-    BX_DIR_NAME,
-    "tmp-video",
-    `${slug}-${Date.now().toString(36)}`,
-  );
-  await mkdir(videoTmpDir, { recursive: true });
-  // NOTE: the persistent console window that appears during a record is
-  // Playwright's own recordVideo ffmpeg encoder — bx cannot pass windowsHide
-  // into that internal spawn. The real fix is to drop recordVideo and capture
-  // via CDP Page.startScreencast on a single chosen page + our own ffmpeg
-  // (windowsHide:true), which would ALSO make Bug 1 structurally impossible
-  // (record one known tab instead of "record every page then guess"). See
-  // decisions.md. Not done here — this task keeps recordVideo and selects the
-  // driven tab by action activity in recordStop.
-  try {
-    await session.relaunch({ recordVideo: { dir: videoTmpDir, size: VIDEO_SIZE } });
-  } catch (err) {
-    await rm(videoTmpDir, { recursive: true, force: true }).catch(() => undefined);
-    throw err;
-  }
-
-  const actionLogStartIndex = session.actions.nextIndex;
-  // The capped log must not trim this recording's transcript away mid-take.
-  session.actions.holdFrom(actionLogStartIndex);
-  state = {
-    slug,
-    startedAtMs: Date.now(),
-    actionLogStartIndex,
-    videoTmpDir,
-  };
-  log(`recording "${slug}" → ${videoTmpDir}`);
-  return { slug };
+/** The page for `tab`, or the active page; launches the browser if needed. */
+async function recordedPage(session: Session, tab: number | undefined): Promise<{ page: Page; tab: number }> {
+  const { pages } = await session.tabs();
+  const want = tab ?? pages.find((p) => p.active)?.id;
+  if (want === undefined) throw { code: "no_page", message: "no page to record" };
+  const page = session.liveContext?.pages().find((p) => session.tabIdOf(p) === want);
+  if (!page) throw { code: "no_page", message: `tab ${want} is closed` };
+  return { page, tab: want };
 }
 
-export async function recordStop(session: Session, outDir: string): Promise<RecordStopResult> {
+function waitFor<T>(promise: Promise<T>, ms: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), ms);
+  });
+  return Promise.race([promise, expired]).finally(() => clearTimeout(timer));
+}
+
+export async function recordStart(
+  session: Session,
+  slug: string,
+  opts: RecordStartOptions = {},
+): Promise<RecordStartResult> {
+  if (state || starting) throw { code: "already_recording", message: `already recording "${state?.slug ?? slug}"` };
+  starting = true;
+  try {
+    return await beginRecording(session, slug, opts);
+  } finally {
+    starting = false;
+  }
+}
+
+async function beginRecording(session: Session, slug: string, opts: RecordStartOptions): Promise<RecordStartResult> {
+  const ffmpeg = await ensureFfmpeg();
+  const { page, tab } = await recordedPage(session, opts.tab);
+  const context = session.liveContext;
+  if (!context) throw { code: "internal", message: "browser is not running" };
+
+  const requestedAt = Date.now();
+  const size = page.viewportSize() ?? DEFAULT_SIZE;
+  const tmpDir = path.join(os.homedir(), BX_DIR_NAME, "tmp-video", `${slug}-${requestedAt.toString(36)}`);
+  await mkdir(tmpDir, { recursive: true });
+  const encoder = new Vp8Encoder(ffmpeg, path.join(tmpDir, "video.webm"), size, { live: true });
+
+  const frameTimes: number[] = [];
+  let first: Frame | null = null;
+  let resolveFirst: (frame: Frame) => void = () => undefined;
+  const firstFrame = new Promise<Frame>((resolve) => {
+    resolveFirst = resolve;
+  });
+  const onFrame = (frame: Frame): void => {
+    encoder.push(frame.data, frame.at);
+    if (first === null) {
+      first = frame;
+      resolveFirst(frame);
+    }
+    frameTimes.push(frame.at - first.at);
+  };
+
+  let capture: PageScreencast | null = null;
+  try {
+    capture = await PageScreencast.start(context, page, { size }, onFrame);
+    // A still page sends no screencast frame until something repaints, so a
+    // screenshot of what the tab shows right now races the first frame.
+    void capture.snapshot(size).then(
+      (frame) => {
+        if (first === null) onFrame(frame);
+      },
+      () => undefined,
+    );
+    const got = await waitFor(firstFrame, FIRST_FRAME_MS);
+    if (got === null) {
+      throw {
+        code: "internal",
+        message: `no frame within ${FIRST_FRAME_MS} ms from tab ${tab} — is its window minimized or covered?`,
+      };
+    }
+    const actionLogStartIndex = session.actions.nextIndex;
+    // The capped log must not trim this recording's transcript away mid-take.
+    session.actions.holdFrom(actionLogStartIndex);
+    const recording: Recording = {
+      slug,
+      tab,
+      fps: opts.fps ?? 30,
+      requestedAt,
+      zeroAt: got.at,
+      actionLogStartIndex,
+      capture,
+      encoder,
+      tmpDir,
+      frameTimes,
+      marks: [],
+      onClose: () => {
+        if (state !== recording) return;
+        recording.marks.push({ atMs: Date.now() - recording.zeroAt, text: "tab closed" });
+        void recording.capture.stop();
+        log(`recording "${slug}": tab ${tab} closed — capture ended`);
+      },
+    };
+    page.once("close", recording.onClose);
+    state = recording;
+    log(`recording "${slug}" tab ${tab} → ${tmpDir}`);
+    return { slug, tab, firstFrameMs: got.at - requestedAt };
+  } catch (err) {
+    if (capture) await capture.stop();
+    encoder.kill();
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+    throw err;
+  }
+}
+
+export async function recordStop(
+  session: Session,
+  outDir: string,
+  opts: RecordStopOptions = {},
+): Promise<RecordStopResult> {
   const current = state;
   if (!current) throw { code: "not_recording", message: "not recording" };
+  state = null;
   try {
-    return await finishRecording(session, current, outDir);
+    return await finishRecording(session, current, outDir, opts);
   } finally {
-    state = null;
+    current.capture.page.off("close", current.onClose);
+    session.actions.holdFrom(null);
     for (const route of Object.keys(harnessRoutes)) delete harnessRoutes[route];
-    // The webm was copied into the package (or the stop failed); either way
+    // The webm was moved into the package (or the stop failed); either way
     // the scratch dir would otherwise accumulate a full recording per run.
-    await rm(current.videoTmpDir, { recursive: true, force: true }).catch(() => undefined);
+    await rm(current.tmpDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+/** rename, or copy + delete across volumes (~/.bx is on the system drive). */
+async function moveFile(from: string, to: string): Promise<void> {
+  try {
+    await rename(from, to);
+  } catch {
+    await copyFile(from, to);
+    await rm(from, { force: true });
   }
 }
 
 async function finishRecording(
   session: Session,
-  current: RecordingState,
+  current: Recording,
   outDir: string,
+  _opts: RecordStopOptions,
 ): Promise<RecordStopResult> {
-  // 1. The action log for this recording becomes the transcript. Once copied,
-  //    the log may trim again.
+  const stopAt = Date.now();
+  await current.capture.stop();
+  // The last frame holds until the moment stop was asked for.
+  await current.encoder.close(stopAt);
+
   const entries = session.actions.since(current.actionLogStartIndex);
-  session.actions.holdFrom(null);
-  const origin = session.logTimeOrigin;
-  const segments = entries.map((entry) => ({
-    t: Math.max(0, origin + entry.t - current.startedAtMs),
-    text: entry.text,
-  }));
-
-  // 2. Grab the video handles before the context goes away: closing it is what
-  //    flushes the webm to disk. Pair each page's video with its tab id NOW —
-  //    the relaunch below closes the pages, and the tab id is what lets us pick
-  //    the tab that was actually driven (step 3).
-  const context = session.liveContext;
-  const pageVideos = (context?.pages() ?? []).map((page) => ({
-    tab: session.tabIdOf(page),
-    video: page.video(),
-  }));
-
-  await session.relaunch();
-
-  // 3. Select the captured tab by ACTION ACTIVITY, not byte size (see
-  //    selectRecordedVideo). Resolve each page's flushed webm, then let the
-  //    pure selector pick the driven tab and flag a wrong-tab capture.
-  const actionsByTab = tallyActionsByTab(entries);
-  const candidates: VideoCandidate[] = [];
-  for (const { tab, video } of pageVideos) {
-    if (!video) continue;
-    try {
-      const file = await video.path();
-      candidates.push({ tab, file, bytes: (await stat(file)).size });
-    } catch {
-      // A page that never painted may have no video; the others still count.
-    }
-  }
-
-  const selection = selectRecordedVideo(candidates, actionsByTab);
-  if (!selection.ok) {
-    if (selection.reason === "wrong-tab") {
-      throw {
-        code: "internal",
-        message: `recording "${current.slug}" captured a tab with zero actions while ${selection.drivenActions} action(s) were driven on another tab — wrong tab captured`,
-      };
-    }
-    throw {
-      code: "internal",
-      message: `no video was captured for "${current.slug}" — check that playwright's ffmpeg is installed`,
-    };
-  }
-  const source = selection.source;
+  const lines = transcriptLines(entries, session.logTimeOrigin, current.zeroAt);
+  const durationMs = stopAt - current.zeroAt;
 
   await mkdir(outDir, { recursive: true });
-  const videoPath = path.join(outDir, "raw.webm");
-  await copyFile(source.file, videoPath);
+  const videoPath = path.join(outDir, "video.webm");
+  const transcriptPath = path.join(outDir, "transcript.txt");
+  const metaPath = path.join(outDir, "recording.json");
+  await moveFile(current.encoder.file, videoPath);
+  await writeFile(transcriptPath, transcriptText(current.slug, lines));
+  await writeFile(
+    metaPath,
+    `${JSON.stringify(
+      {
+        slug: current.slug,
+        tab: current.tab,
+        startedAt: new Date(current.zeroAt).toISOString(),
+        durationMs,
+        captureFps: current.fps,
+        outputFps: OUTPUT_FPS,
+        frames: current.frameTimes.length,
+        screencastFrames: current.capture.frames,
+        encodedFrames: current.encoder.written,
+        marks: current.marks,
+        actions: lines,
+        frameTimesMs: current.frameTimes,
+      },
+      null,
+      2,
+    )}\n`,
+  );
 
-  // 3. Distill it in-browser.
-  await ensureHarnessBundle();
-  const bundle = await readFile(HARNESS_BUNDLE);
-  const video = await readFile(videoPath);
-  const port = await daemonPort(session.profile);
-
-  let finished = false;
-  let failure: string | null = null;
-  const nonce = randomUUID();
-  const route = (pathname: string, handler: (req: Request) => Promise<Response>): void => {
-    harnessRoutes[pathname] = requireNonce(nonce, handler);
+  log(`recording "${current.slug}" stopped in ${Date.now() - stopAt} ms → ${outDir}`);
+  return {
+    dir: outDir,
+    videoPath,
+    transcriptPath,
+    metaPath,
+    reportPath: path.join(outDir, "report.md"),
+    distill: "failed",
+    durationMs,
+    frames: current.frameTimes.length,
+    actionCount: lines.length,
   };
-
-  route("/harness", async () =>
-    new Response(harnessHtml(nonce), { headers: { "content-type": "text/html; charset=utf-8" } }));
-  route("/harness.js", async () =>
-    new Response(new Uint8Array(bundle), {
-      headers: { "content-type": "text/javascript; charset=utf-8" },
-    }));
-  route("/harness/video", async () =>
-    new Response(new Uint8Array(video), { headers: { "content-type": "video/webm" } }));
-  route("/harness/meta", async () => json({ title: current.slug, segments }));
-  route("/harness/result", async (req) => {
-    const body = parseResultBody(await req.json());
-    if (!body) return json({ ok: false, error: "bad result body" }, 400);
-    const target = safeJoin(outDir, body.path);
-    if (!target) return json({ ok: false, error: `unsafe path: ${body.path}` }, 400);
-    await mkdir(path.dirname(target), { recursive: true });
-    await writeFile(target, Buffer.from(body.base64, "base64"));
-    return json({ ok: true });
-  });
-  route("/harness/done", async () => {
-    finished = true;
-    return json({ ok: true });
-  });
-  route("/harness/error", async (req) => {
-    failure = messageOf(await req.json());
-    return json({ ok: true });
-  });
-
-  const relaunched = session.liveContext;
-  if (!relaunched) throw { code: "internal", message: "browser is not running after relaunch" };
-  const page = await relaunched.newPage();
-
-  // The page reports progress into #log; carry it into any error, since the
-  // daemon has no other view of what happened inside the browser.
-  const harnessLog = async (): Promise<string> => {
-    const text = await page.textContent("#log").catch(() => null);
-    return text === null || text.trim() === "" ? "" : ` — harness log: ${tail(text, 8)}`;
-  };
-
-  const reportPath = path.join(outDir, "report.md");
-  try {
-    await page.goto(`http://127.0.0.1:${port}/harness?n=${encodeURIComponent(nonce)}`, {
-      waitUntil: "domcontentloaded",
-      timeout: 30_000,
-    });
-
-    const deadline = Date.now() + DISTILL_TIMEOUT_MS;
-    while (!finished && failure === null) {
-      if (Date.now() > deadline) {
-        throw { code: "internal", message: `distill timed out${await harnessLog()}` };
-      }
-      await new Promise((resolve) => setTimeout(resolve, 200));
-    }
-    if (failure !== null) {
-      throw { code: "internal", message: `distill failed: ${failure}${await harnessLog()}` };
-    }
-    if ((await mtimeMs(reportPath)) === null) {
-      throw {
-        code: "internal",
-        message: `distill wrote no report.md into ${outDir}${await harnessLog()}`,
-      };
-    }
-  } finally {
-    await page.close().catch(() => undefined);
-  }
-
-  log(`recording "${current.slug}" distilled → ${outDir}`);
-  return { dir: outDir, reportPath, videoPath, actionCount: segments.length };
 }
