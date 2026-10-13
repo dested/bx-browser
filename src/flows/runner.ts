@@ -9,6 +9,7 @@ import { pathToFileURL } from "node:url";
 import { CliError, cmd, formatConsoleEntry, renderEl } from "../client.ts";
 import { FlowAssertionError, FlowContext, FlowStepError } from "./api.ts";
 import type { Flow } from "./api.ts";
+import type { RecordStopResult } from "../protocol.ts";
 
 const FAILURE_CONSOLE_LINES = 5;
 
@@ -90,7 +91,8 @@ export async function runFlow(
   const slug = slugify(flow.name);
   let recording = false;
   if (opts.record) {
-    const res = await cmd(opts.profile, { cmd: "recordStart", slug }, start);
+    // The flow's tab opens on its first step and takes the front; follow moves the capture onto it.
+    const res = await cmd(opts.profile, { cmd: "recordStart", slug, follow: true }, start);
     if (!res.ok) throw new CliError(1, `could not start recording: ${res.error.message}`);
     recording = true;
   }
@@ -121,11 +123,14 @@ export async function runFlow(
   } finally {
     if (recording) {
       const outDir = path.resolve(process.cwd(), "recordings", slug);
-      const res = await cmd(opts.profile, { cmd: "recordStop", outDir });
+      const res = await cmd<RecordStopResult>(opts.profile, { cmd: "recordStop", outDir });
       if (!res.ok) process.stderr.write(`✗ recording: ${res.error.message}\n`);
-      else process.stdout.write(`recording → ${outDir}\n`);
+      else {
+        const note = res.data.distill === "running" ? " (report.md distills in the background)" : "";
+        process.stdout.write(`recording → ${outDir}${note}\n`);
+      }
     }
-    // Only after recordStop: closing the tab first would drop its video.
+    // Only after recordStop: closing the recorded tab first ends its capture early.
     await ctx.close();
   }
 }
