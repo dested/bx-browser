@@ -27,11 +27,10 @@ bx agent "log in as demo@acme.test and verify the invoice list loads" --save inv
 
 - Runs on **Haiku** (one-shot Sonnet escalation on failure) and returns a
   ~300-token pass/fail report with evidence. Ends with a trailer —
-  `tier=haiku turns=14 wall=25.9s cost=$0.037` — quote it when reporting.
-- The trailer prints both `cost=$` (metered) and `est=$` (the governance
-  estimate). On aborted runs `est` includes the aborted rung's spend, which
-  metered cost structurally cannot — so `est` is the number to trust when a run
-  hit `--budget` or `--max-wall`.
+  `tier=haiku turns=6 wall=25.9s est=$0.0021 sdk=$0.1034` — quote it when reporting.
+- Quote `est=$`, always: it is the dated price table in `src/agent/pricing.ts`
+  applied to metered tokens, and includes an aborted rung's spend. `sdk=$` is the
+  Agent SDK's own price table, ~50× high for Haiku 5.5 until the SDK catches up.
 - `--opus` allows one FINAL escalation Sonnet → Opus 5.5. Complex flows only
   (long multi-page journeys, gnarly canvas work) — ~2× Sonnet cost. Don't pass
   it by default; add it when a Sonnet attempt already failed on a task that

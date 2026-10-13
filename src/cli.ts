@@ -571,10 +571,11 @@ function renderReport(report: AgentReport): string {
   lines.push(
     `tier=${report.tier}${report.escalated ? " (escalated)" : ""}${ended} turns=${report.turns} ` +
       `wall=${(report.wallMs / 1000).toFixed(1)}s tokens=${u.inputTokens}/${u.outputTokens} ` +
-      `(${u.cacheReadTokens} cached) cost=$${u.costUsd === null ? "n/a" : u.costUsd.toFixed(4)}` +
-      // Both figures, always: on an aborted run the estimate includes the rung
-      // the metered cost structurally cannot see.
-      `${report.estUsd === undefined ? "" : ` est=$${report.estUsd.toFixed(2)}`}`,
+      `(${u.cacheReadTokens} cached)` +
+      // est (pricing.ts on metered tokens) is the number to quote; sdk is the
+      // SDK's own price table, which can lag new models by a wide margin.
+      `${report.estUsd === undefined ? "" : ` est=$${report.estUsd.toFixed(4)}`}` +
+      ` sdk=$${u.costUsd === null ? "n/a" : u.costUsd.toFixed(4)}`,
   );
   if (report.transcriptPath !== undefined) lines.push(`  transcript ${report.transcriptPath}`);
   return lines.join("\n");

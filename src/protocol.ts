@@ -536,7 +536,7 @@ export interface AgentUsage {
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
-  costUsd: number | null; // when the SDK reports it, else null
+  costUsd: number | null; // the SDK's own figure (its bundled price table), else null
 }
 
 export interface AgentReport {
@@ -553,10 +553,12 @@ export interface AgentReport {
   transcriptPath?: string;
   /** how the final rung ended. "report" is the only healthy value. */
   endedBy?: "report" | "turns" | "stall" | "budget" | "wall" | "error";
-  /** the governance estimate, rebased to metered cost at each rung boundary.
-   * On aborted runs this INCLUDES the aborted rung's spend, which `usage.costUsd`
-   * structurally cannot (its result message never arrives) — the trailer prints
-   * both so est-vs-metered is never conflated again. */
+  /** the cost estimate the budget cap runs on: src/agent/pricing.ts applied to
+   * each rung's metered token totals (rebased at every rung boundary). The
+   * number to quote. `usage.costUsd` is the SDK's own figure from its bundled
+   * price table, which can predate the pinned models (0.3.221 bills Haiku 5.5
+   * at $5/$25). On aborted runs estUsd also includes the aborted rung's spend,
+   * which `usage.costUsd` structurally cannot (its result never arrives). */
   estUsd?: number;
 }
 
