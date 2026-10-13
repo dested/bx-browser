@@ -151,21 +151,29 @@ function resultSettle(data: unknown): number | undefined {
 
 const DEADLINE_MIN_MS = 1000;
 const DEADLINE_MAX_MS = 600_000;
+const RECORD_START_DEADLINE_MS = 60_000;
+
+/** The client's deadline header (default 10 s), clamped. */
+function deadlineFromHeader(header: string | string[] | undefined): number {
+  const raw = Number(Array.isArray(header) ? header[0] : header);
+  const asked = Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_DEADLINE_MS;
+  return Math.min(DEADLINE_MAX_MS, Math.max(DEADLINE_MIN_MS, asked));
+}
 
 /**
  * How long a command may run (R3), or null for none. The header (default 10 s,
  * clamped) is raised to cover a command's own timeout so an explicit
  * `--timeout 20000` wait isn't cut off at 10 s; drive gets its own budget and
  * the recording commands that encode are exempt: stop (a ring encodes its
- * frames there, --mp4 transcodes), save and distill can take minutes. Start,
- * mark and status keep the default: start is a CDP call plus one frame.
+ * frames there, --mp4 transcodes), save and distill can take minutes. Start
+ * gets at least 60 s: a machine's first one installs Playwright's ffmpeg. Mark
+ * and status keep the default.
  */
 function deadlineFor(cmd: Cmd, header: string | string[] | undefined): number | null {
   if (cmd.cmd === "recordStop" || cmd.cmd === "recordSave" || cmd.cmd === "recordDistill") return null;
   if (cmd.cmd === "drive") return (cmd.timeoutMs ?? 15000) + 5000;
-  const raw = Number(Array.isArray(header) ? header[0] : header);
-  const asked = Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_DEADLINE_MS;
-  let ms = Math.min(DEADLINE_MAX_MS, Math.max(DEADLINE_MIN_MS, asked));
+  if (cmd.cmd === "recordStart") return Math.max(RECORD_START_DEADLINE_MS, deadlineFromHeader(header));
+  let ms = deadlineFromHeader(header);
   if ("timeoutMs" in cmd && cmd.timeoutMs !== undefined) ms = Math.max(ms, cmd.timeoutMs + 5000);
   if (cmd.cmd === "wait" && cmd.ms !== undefined) ms = Math.max(ms, Math.min(cmd.ms, 30000) + 5000);
   return Math.min(DEADLINE_MAX_MS, ms);
