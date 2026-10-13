@@ -2,6 +2,61 @@
 
 Newest first. Append-only; supersede, never delete.
 
+## 2026-10-12 — Refs are element identities, not scan generations
+
+**Why:** a ref that expired on every `els` scan or navigation forced a re-scan
+before nearly every click. The page keeps `window.__bx` (ref → WeakRef, element
+→ ref) with numbers that grow per tab and are never reused, so a ref is stale
+only when its element left the page. The winner of a resolution gets
+`data-bx-ref` and the locator targets that attribute.
+**Rejected:** CSS-path re-resolution (quadratic on big DOMs and wrong after
+re-renders); keeping generations (the main source of `stale_ref` churn).
+Supersedes the "refs go stale on navigation and els scans" behavior.
+
+## 2026-10-12 — Target resolution ranks and reports ties
+
+**Why:** first-match-wins picked "Save draft" for "Save" and hidden test-id
+twins. One in-page pass scores visible candidates (exact name > exact text >
+prefix > substring; dialog and viewport break ties); a tie at the top is
+`ambiguous` with the candidates as refs unless `--first`. Only a modal
+(`:modal` or aria-modal) restricts matching to itself.
+**Rejected:** Playwright locator chains tried in order (fast to write, wrong on
+real pages, no tie detection).
+
+## 2026-10-12 — Batch is client-side only
+
+**Why:** `bx -` and `bx do` loop POST /cmd inside one CLI process, which already
+removes the per-command process start (~45 ms floor). A /batch endpoint would
+add a second dispatch path and partial-failure semantics for ~1 ms more.
+**Rejected:** a daemon /batch route.
+
+## 2026-10-12 — Every command has a daemon-side deadline
+
+**Why:** a busy-looping page hung `js`, `status` and everything behind them.
+The client sends `x-bx-deadline-ms` (default 10 s, raised to timeoutMs + 5 s);
+the daemon answers `deadline … during <step>` and discards the abandoned work,
+since Playwright can't interrupt a hung evaluate. Drive and recordings size
+their own.
+**Rejected:** client-only timeouts (the daemon stays wedged); killing the tab
+(loses the user's state).
+
+## 2026-10-12 — Agent escalation only on capability failures; cost quoted from our own table
+
+**Why:** escalating after a budget or wall-clock stop just spent more on the
+same failure. A rung escalates only on the model's own fail report or a stall,
+and hands up the full tab action log. The Agent SDK's bundled price table
+predates the 5.5 models (Haiku billed at $5/$25), so `est=$` comes from
+src/agent/pricing.ts on metered tokens and `sdk=$` is shown beside it.
+**Rejected:** trusting `total_cost_usd`; escalating on any non-pass ending.
+
+## 2026-10-12 — The active tab is held by identity
+
+**Why:** an index shifted whenever tabs opened or closed, and any popup became
+active, so an agent's popup hijacked the operator's next unpinned command. A
+popup becomes active only when the active tab opened it.
+**Rejected:** never activating popups (breaks the human "click opens a tab"
+expectation).
+
 ## 2026-10-08 — The action log keeps the newest 1000 entries, with absolute indexes
 
 **Why:** The log grew without limit, and some daemons run for hours. Every
