@@ -217,13 +217,13 @@ All optional fields; the full text is in `G:\code\bx\src\protocol.ts` once lande
 
 ## Ledger (lead, updated 2026-10-12)
 
-Board: down · Last pushed: b3dc301 (origin/main; local main ahead, unpushed) · Gate: n/a
+Board: down · Last pushed: b3dc301 · Gate: running on 2e42e9d (scratchpad/gate-<sha>)
 
 | Agent | Model | Owns | Item now | Last sha / artifact | Status |
 | --- | --- | --- | --- | --- | --- |
 | scout | opus-xhigh | research report | Q1–Q3 | — | running |
-| core | opus-high | session.ts, daemon.ts, serialize.ts | A2 → resolver wiring → C6 → G3-daemon | …A3 f0e821b, infra-handoff e1bc41b (passed) | running |
-| resolver | opus-high | resolve.ts, distill.ts, tests/resolve.test.ts | C3b (modal-only scoping), then LEGACY delete after wiring | 4739d97 (passed; els 6k 1,440→12 ms) | running |
+| core | opus-high | session.ts, daemon.ts, serialize.ts | queue empty; on call for gate failures | …A2 09e65cb C6 1927fc5 G3 41a17a0 C1-wire 5544ca1 (passed) | idle |
+| resolver | opus-high | resolve.ts, distill.ts, tests/resolve.test.ts | all done: C1 C2 C3 C3b C8 S5, C1-fix, LEGACY delete | 4739d97 80d6267 de96220 (passed) | stopped |
 | agentkit | opus-high | src/agent/**, src/bench/** | waits on lead sha for full run | 483656a b8f4ade 132f915 (passed) | idle |
 | infra | opus-high | observe, debug, record, actionLog, orphans, maintenance, flows | all done: O1 O1b O5 D1 D3 D4 F1 F2 F3 R2 R2b | …d66e5a7 aa00266 e7338f8 (passed) | stopped |
 | lead | — | cli, client, protocol, constants, script | doctor/gc wired; agentkit + infra handoffs | 98a40d2 | next: resolver wiring forward, gate |
