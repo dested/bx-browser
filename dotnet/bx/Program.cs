@@ -286,13 +286,33 @@ internal static partial class Program
     [LibraryImport("kernel32.dll")]
     private static partial IntPtr GetConsoleWindow();
 
+    [LibraryImport("kernel32.dll")]
+    private static partial IntPtr GetStdHandle(int nStdHandle);
+
+    [LibraryImport("kernel32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetHandleInformation(IntPtr hObject, uint dwMask, uint dwFlags);
+
+    private const int StdOutputHandle = -11;
+    private const int StdErrorHandle = -12;
+    private const uint HandleFlagInherit = 1;
+
+    // After bun exits, how long its last output may take to drain from the
+    // pipe. The relays never see EOF when bun started a daemon: the daemon
+    // inherits the write ends and keeps them for its whole life.
+    private const int DrainMs = 250;
+
     /// <summary>
-    /// The Bun CLI, same arguments; its exit code is ours. Run from a terminal
-    /// (bx.exe has a console window) the child shares that console: colors,
-    /// Ctrl+C and stdin behave as if bun had been run directly. Spawned hidden
-    /// (no console window, e.g. a script's windowsHide), the child gets
-    /// CREATE_NO_WINDOW and piped stdio that bx.exe relays, so it can never
-    /// open a console window of its own.
+    /// The Bun CLI, same arguments; its exit code is ours. stdout and stderr
+    /// always go through pipes bx.exe relays, and bx.exe's own output handles
+    /// are made non-inheritable first: otherwise a daemon that bun spawns
+    /// inherits them and holds the caller's pipe open after bx.exe exits (a
+    /// `bx … | cat` or a script reading our output would hang). Run from a
+    /// terminal (bx.exe has a console window) the child shares that console,
+    /// so Ctrl+C and stdin behave as if bun had been run directly. Spawned
+    /// hidden (no console window, e.g. a script's windowsHide), the child also
+    /// gets CREATE_NO_WINDOW and piped stdin, so it can never open a console
+    /// window of its own.
     /// </summary>
     private static int RunBun(string[] args)
     {
@@ -306,11 +326,16 @@ internal static partial class Program
             UseShellExecute = false,
             CreateNoWindow = hidden,
             RedirectStandardInput = hidden,
-            RedirectStandardOutput = hidden,
-            RedirectStandardError = hidden,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
         };
         start.ArgumentList.Add(Path.Combine(root, "src", "cli.ts"));
         foreach (var arg in args) start.ArgumentList.Add(arg);
+
+        // Our own stdout/stderr must not leak into bun (and from bun into a
+        // daemon it spawns); bun gets the relay pipes instead.
+        SetHandleInformation(GetStdHandle(StdOutputHandle), HandleFlagInherit, 0);
+        SetHandleInformation(GetStdHandle(StdErrorHandle), HandleFlagInherit, 0);
 
         // With a shared console, Ctrl+C reaches the child too; stay alive to
         // collect its exit code.
@@ -319,20 +344,15 @@ internal static partial class Program
         {
             using var child = Process.Start(start);
             if (child is null) return Fail("bx.exe: bun did not start");
-            if (!hidden)
-            {
-                child.WaitForExit();
-                return child.ExitCode;
-            }
 
             var stdout = Relay(child.StandardOutput.BaseStream, Console.OpenStandardOutput(), closeTarget: false);
             var stderr = Relay(child.StandardError.BaseStream, Console.OpenStandardError(), closeTarget: false);
             // stdin may stay open forever (a parent that never closes its end):
             // relay it in the background and never wait for it.
-            Relay(Console.OpenStandardInput(), child.StandardInput.BaseStream, closeTarget: true);
+            if (hidden) Relay(Console.OpenStandardInput(), child.StandardInput.BaseStream, closeTarget: true);
             child.WaitForExit();
-            stdout.Join();
-            stderr.Join();
+            stdout.Join(DrainMs);
+            stderr.Join(DrainMs);
             return child.ExitCode;
         }
         catch (Win32Exception e)
