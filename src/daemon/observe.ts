@@ -131,7 +131,6 @@ function consoleLevel(type: string): ConsoleEntry["level"] {
 
 /** `tab` is the page's stable id; every entry it produces carries it. */
 export function attachObservers(page: Page, buffers: Buffers, tab?: number): void {
-  const started = new WeakMap<Request, number>();
   const bodies = bodiesOf(buffers);
 
   page.on("console", (msg) => {
@@ -154,49 +153,119 @@ export function attachObservers(page: Page, buffers: Buffers, tab?: number): voi
     });
   });
 
-  page.on("request", (req) => {
-    started.set(req, Date.now());
-  });
+  const net = new NetTracker<Request, Response>(buffers, tab, (id, res) => bodies.keep(id, res));
+  page.on("request", (req) => net.onRequest(req));
+  page.on("response", (res) => net.onResponse(res));
+  page.on("requestfinished", (req) => net.onFinished(req));
+  page.on("requestfailed", (req) => net.onFailed(req));
+}
 
-  const record = async (req: Request, aborted: boolean): Promise<void> => {
+/** The slice of Playwright's Request that network bookkeeping reads (fakeable in tests). */
+export interface NetRequest {
+  method(): string;
+  url(): string;
+  resourceType(): string;
+  timing(): { responseEnd: number };
+}
+export interface NetResponse<R extends NetRequest> {
+  status(): number;
+  request(): R;
+}
+
+/**
+ * One NetEntry per request, pushed when its response arrives (O1b): status,
+ * headers and type are known then, and waiting for `requestfinished` made a
+ * fetch whose body the page never reads show up 0.3–1.5 s late. Finishing or
+ * failing updates the same entry in place (the ring holds the object), with
+ * the full duration and the failed flag. A request that fails before any
+ * response is pushed on `requestfailed`, status 0.
+ */
+export class NetTracker<Req extends NetRequest, Res extends NetResponse<Req>> {
+  private readonly started = new WeakMap<Req, number>();
+  private readonly entries = new WeakMap<Req, NetEntry>();
+  private readonly buffers: Buffers;
+  private readonly tab: number | undefined;
+  private readonly keep: (id: number, res: Res) => void;
+  private readonly now: () => number;
+
+  constructor(buffers: Buffers, tab: number | undefined, keep: (id: number, res: Res) => void, now: () => number = Date.now) {
+    this.buffers = buffers;
+    this.tab = tab;
+    this.keep = keep;
+    this.now = now;
+  }
+
+  onRequest(req: Req): void {
+    this.started.set(req, this.now());
+  }
+
+  onResponse(res: Res): void {
     try {
-      const response = aborted ? null : await req.response();
-      const status = response?.status() ?? 0;
-      let ms = 0;
-      try {
-        const timing = req.timing();
-        if (timing.responseEnd > 0) ms = Math.round(timing.responseEnd);
-      } catch {
-        // timing is unavailable for requests that never reached the network
-      }
-      if (ms <= 0) {
-        const t0 = started.get(req);
-        ms = t0 === undefined ? 0 : Date.now() - t0;
-      }
-      const id = bodies.take();
-      if (response) bodies.keep(id, response);
-      buffers.net.push({
-        id,
-        tab,
-        resourceType: req.resourceType(),
-        t: Date.now() - buffers.t0,
-        method: req.method(),
-        url: req.url().slice(0, URL_CAP),
-        status,
-        ms,
-        failed: aborted || status >= 400,
-      });
+      const req = res.request();
+      const status = res.status();
+      const entry = this.push(req, status, status >= 400);
+      this.keep(entry.id, res);
     } catch {
       // page torn down mid-flight; the entry is not worth surfacing
     }
-  };
+  }
 
-  page.on("requestfinished", (req) => {
-    void record(req, false);
-  });
-  page.on("requestfailed", (req) => {
-    void record(req, true);
-  });
+  onFinished(req: Req): void {
+    try {
+      const entry = this.entries.get(req);
+      if (!entry) {
+        // No response event seen (rare): record it now, as before O1b.
+        this.push(req, 0, false).ms = this.duration(req);
+        return;
+      }
+      entry.ms = this.duration(req);
+    } catch {
+      // page torn down mid-flight
+    }
+  }
+
+  onFailed(req: Req): void {
+    try {
+      const entry = this.entries.get(req) ?? this.push(req, 0, true);
+      entry.failed = true;
+      entry.ms = this.duration(req);
+    } catch {
+      // page torn down mid-flight
+    }
+  }
+
+  private push(req: Req, status: number, failed: boolean): NetEntry & { id: number } {
+    const entry: NetEntry & { id: number } = {
+      id: bodiesOf(this.buffers).take(),
+      tab: this.tab,
+      resourceType: req.resourceType(),
+      t: this.now() - this.buffers.t0,
+      method: req.method(),
+      url: req.url().slice(0, URL_CAP),
+      status,
+      ms: this.elapsed(req),
+      failed,
+    };
+    this.entries.set(req, entry);
+    this.buffers.net.push(entry);
+    return entry;
+  }
+
+  private elapsed(req: Req): number {
+    const t0 = this.started.get(req);
+    return t0 === undefined ? 0 : Math.max(0, this.now() - t0);
+  }
+
+  /** Chrome's own responseEnd when it has one, else wall time since the request event. */
+  private duration(req: Req): number {
+    try {
+      const end = req.timing().responseEnd;
+      if (end > 0) return Math.round(end);
+    } catch {
+      // timing is unavailable for requests that never reached the network
+    }
+    return this.elapsed(req);
+  }
 }
 
 function escapeRegExp(s: string): string {
