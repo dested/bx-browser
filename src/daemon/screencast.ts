@@ -388,17 +388,23 @@ export class PageScreencast {
       capture.frames++;
       onFrame({ data: Buffer.from(event.data, "base64"), at: Date.now() });
     });
-    await cdp.send("Page.startScreencast", {
-      format: "jpeg",
-      quality: 70,
-      maxWidth: opts.size.width,
-      maxHeight: opts.size.height,
-      // Every frame, always: Chrome sends frames only on damage, and
-      // everyNthFrame 2 dropped 6 of 12 single repaints in a still page (a
-      // click's result could go missing until the next repaint). The 30/60
-      // choice is made downstream, where the last frame in a slot wins.
-      everyNthFrame: 1,
-    });
+    try {
+      await cdp.send("Page.startScreencast", {
+        format: "jpeg",
+        quality: 70,
+        maxWidth: opts.size.width,
+        maxHeight: opts.size.height,
+        // Every frame, always: Chrome sends frames only on damage, and
+        // everyNthFrame 2 dropped 6 of 12 single repaints in a still page (a
+        // click's result could go missing until the next repaint). The 30/60
+        // choice is made downstream, where the last frame in a slot wins.
+        everyNthFrame: 1,
+      });
+    } catch (err) {
+      capture.ended = true;
+      await cdp.detach().catch(() => undefined);
+      throw err;
+    }
     return capture;
   }
 

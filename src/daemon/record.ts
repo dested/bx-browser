@@ -19,8 +19,9 @@ import { existsSync } from "node:fs";
 import { copyFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import type { Page } from "playwright-core";
+import type { BrowserContext, Page } from "playwright-core";
 import {
   BX_DIR_NAME,
   RUN_DIR,
@@ -500,23 +501,63 @@ function feed(sink: Sink, frame: Frame): void {
  * Starts the screencast on `page`. A still page sends no screencast frame
  * until something repaints, so a screenshot of what it shows right now races
  * the first frame; whichever lands first opens this stretch of video.
+ *
+ * `handoff` (follow): the capture being replaced keeps running until this one
+ * has started, then stops before this one's frames flow, so a failed start
+ * leaves the old capture in place and the two never interleave.
  */
 async function capturePage(
   session: Session,
   page: Page,
   size: { width: number; height: number },
   onFrame: (frame: Frame) => void,
+  handoff?: PageScreencast,
 ): Promise<PageScreencast> {
   const context = session.liveContext;
   if (!context) throw { code: "internal", message: "browser is not running" };
-  const capture = await PageScreencast.start(context, page, { size }, onFrame);
+  let open = handoff === undefined;
+  let forwarded = 0;
+  const gated = (frame: Frame): void => {
+    if (!open) return;
+    forwarded++;
+    onFrame(frame);
+  };
+  const capture = await startScreencast(context, page, size, gated);
+  if (handoff) {
+    await handoff.stop();
+    open = true;
+  }
   void capture.snapshot(size).then(
     (frame) => {
-      if (capture.frames === 0 && !capture.stopped) onFrame(frame);
+      if (forwarded === 0 && !capture.stopped) onFrame(frame);
     },
     () => undefined,
   );
   return capture;
+}
+
+/** Back-off for a tab Chrome hasn't attached yet ("Not attached to an active page"). */
+const ATTACH_RETRY_MS = [25, 50, 100, 200, 400, 800];
+
+/**
+ * A tab opened a moment ago (a flow's first step, `tab new`) can't screencast
+ * until Chrome attaches its first document; retry for about 1.5 s.
+ */
+async function startScreencast(
+  context: BrowserContext,
+  page: Page,
+  size: { width: number; height: number },
+  onFrame: (frame: Frame) => void,
+): Promise<PageScreencast> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await PageScreencast.start(context, page, { size }, onFrame);
+    } catch (err) {
+      const wait = ATTACH_RETRY_MS[attempt];
+      if (wait === undefined || page.isClosed() || !/not attached to an active page/i.test(errorText(err))) throw err;
+      await delay(wait);
+    }
+  }
 }
 
 export async function recordStart(
@@ -624,8 +665,8 @@ async function beginRecording(session: Session, slug: string, opts: RecordStartO
 /**
  * --follow: move the capture to the active tab. Re-targets queue on the
  * recording's chain so two quick tab switches can't interleave, and stop
- * waits for the last one. The gap between the old capture and the new one is
- * about a millisecond; a still page opens on a screenshot (capturePage).
+ * waits for the last one. The old capture runs until the new one has started
+ * (capturePage's handoff); a still page opens on a screenshot.
  */
 function followActive(session: Session, rec: Recording): void {
   rec.chain = rec.chain
@@ -636,8 +677,7 @@ function followActive(session: Session, rec: Recording): void {
       if (id === undefined || (id === rec.tab && !rec.capture.stopped)) return;
       const page = session.liveContext?.pages().find((p) => session.tabIdOf(p) === id);
       if (!page || page.isClosed()) return;
-      await rec.capture.stop();
-      rec.capture = await capturePage(session, page, rec.size, rec.onFrame);
+      rec.capture = await capturePage(session, page, rec.size, rec.onFrame, rec.capture);
       rec.tab = id;
       rec.tabs.push({ tab: id, at: Date.now() });
       watchClose(rec, page);

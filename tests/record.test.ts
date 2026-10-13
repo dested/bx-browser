@@ -195,10 +195,12 @@ function isWebm(file: string): boolean {
 let liveOut = "";
 let loginTab = 0;
 let otherTab = 0;
+let livePort = 0;
 
 live("live: setup — the fixture login with a typed value, and a second tab", async () => {
   await stopDaemon(LIVE ?? "");
   const run = await ensureDaemon(LIVE ?? "", { headless: true });
+  livePort = run.port;
   liveOut = mkdtempSync(path.join(os.tmpdir(), "bx-record-"));
   await liveCmd({ cmd: "open", url: `http://127.0.0.1:${run.port}/fixture/#/login` });
   await liveCmd({ cmd: "fill", target: { testid: "email" }, value: "typed@record.test" });
@@ -245,18 +247,21 @@ live("live: ring mode saves the last seconds while capture goes on", async () =>
   const start = await liveCmd<RecordStartResult>({ cmd: "recordStart", slug: "live-ring", ring: 30 });
   expect(start.ring).toBe(30);
   for (let i = 0; i < 4; i++) {
-    await liveCmd({ cmd: "fill", target: { testid: "password" }, value: `pw-${i}` });
+    await liveCmd({ cmd: "fill", target: { testid: "email" }, value: `ring-${i}@record.test` });
     await Bun.sleep(600);
   }
   const save = await liveCmd<RecordStopResult>({ cmd: "recordSave", lastSecs: 1, outDir: path.join(liveOut, "live-ring-save") });
   expect(save.durationMs).toBeLessThanOrEqual(1100);
   expect(isWebm(save.videoPath)).toBe(true);
+  const saved = readFileSync(save.transcriptPath, "utf8");
+  expect(saved).toContain("ring-3@");
+  expect(saved).not.toContain("ring-0@");
   const status = await liveCmd<RecordStatusResult>({ cmd: "recordStatus" });
   expect(status.recording).toBe(true);
   expect(status.bufferedBytes ?? 0).toBeGreaterThan(0);
   const stop = await liveCmd<RecordStopResult>({ cmd: "recordStop", outDir: path.join(liveOut, "live-ring") });
   expect(stop.durationMs).toBeGreaterThan(2000);
-  expect(readFileSync(stop.transcriptPath, "utf8")).toContain("pw-3");
+  expect(readFileSync(stop.transcriptPath, "utf8")).toContain("ring-3@");
   await distilled();
 }, LIVE_MS);
 
@@ -275,6 +280,20 @@ live("live: --follow moves the capture with the active tab", async () => {
     otherTab,
     loginTab,
   ]);
+  await distilled();
+}, LIVE_MS);
+
+live("live: --follow picks up a tab opened in front (bx run --record's first step)", async () => {
+  await liveCmd({ cmd: "recordStart", slug: "live-fresh", follow: true });
+  const opened = await liveCmd<TabsResult>({ cmd: "tabNew" });
+  const fresh = opened.created?.id ?? 0;
+  await liveCmd({ cmd: "open", url: `http://127.0.0.1:${livePort}/fixture/#/login` });
+  await Bun.sleep(300);
+  expect((await liveCmd<RecordStatusResult>({ cmd: "recordStatus" })).tab).toBe(fresh);
+  const stop = await liveCmd<RecordStopResult>({ cmd: "recordStop", outDir: path.join(liveOut, "live-fresh") });
+  expect(readFileSync(stop.metaPath, "utf8")).toContain(`"tab": ${fresh}`);
+  await liveCmd({ cmd: "tabClose", tab: fresh });
+  await liveCmd({ cmd: "tabSelect", index: 0 });
   await distilled();
 }, LIVE_MS);
 
