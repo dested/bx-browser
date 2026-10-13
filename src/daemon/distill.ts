@@ -261,8 +261,12 @@ export function bxPage(op: PageOp): PageOut {
     }
   };
   visit({ node: document, frameEls: [], dx: 0, dy: 0 });
-  // The topmost open dialog scopes the page: listed first, background dropped.
-  const scope = dialogs.length > 0 ? (dialogs[dialogs.length - 1] ?? null) : null;
+  // The topmost modal (showModal's :modal, or aria-modal) scopes the page:
+  // listed first, background dropped. A non-modal open dialog doesn't block
+  // the page, so it only lists first.
+  const modals = dialogs.filter((d) => d.getAttribute("aria-modal") === "true" || d.matches(":modal"));
+  const scope = modals[modals.length - 1] ?? null;
+  const openDialogs = scope === null ? dialogs : [scope];
 
   const frameIdsOf = (root: Root): number[] => {
     if (root.frameIds) return root.frameIds;
@@ -278,7 +282,7 @@ export function bxPage(op: PageOp): PageOut {
     const top = r.top + root.dy;
     const left = r.left + root.dx;
     const inView = top < vh && top + r.height > 0 && left < vw && left + r.width > 0;
-    const inDialog = scope !== null && composedContains(scope, el);
+    const inDialog = openDialogs.some((d) => composedContains(d, el));
     return { el, root, top, left, height: r.height, inView, inDialog };
   };
 

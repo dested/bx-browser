@@ -254,6 +254,19 @@ const SCENARIOS: Record<string, Scenario> = {
     assert.deepEqual((await scanEls(native)).els.map((e) => e.name), ["Inside"]);
   },
 
+  "C3b: only a modal hides the page; a non-modal open dialog just lists first": async (newPage) => {
+    const page = await newPage(`<button>Behind</button><dialog open><button>Inside</button></dialog>`);
+    const nonModal = (await scanEls(page)).els;
+    assert.deepEqual(nonModal.map((e) => `${e.name}:${e.dialog === true}`), ["Inside:true", "Behind:false"]);
+
+    const modal = await newPage(`<button>Behind</button><dialog><button>Inside</button></dialog>`);
+    await modal.evaluate(() => document.querySelector("dialog")?.showModal());
+    assert.deepEqual((await scanEls(modal)).els.map((e) => `${e.name}:${e.dialog === true}`), ["Inside:true"]);
+
+    const aria = await newPage(`<button>Behind</button><div role="dialog" aria-modal="true"><button>Inside</button></div>`);
+    assert.deepEqual((await scanEls(aria)).els.map((e) => e.name), ["Inside"]);
+  },
+
   "C8: --clickables adds cursor:pointer elements with no role": async (newPage) => {
     const page = await newPage(`<div style="cursor:pointer"><span>Card two</span></div><button>Real</button>`);
     assert.deepEqual((await scanEls(page)).els.map((e) => e.name), ["Real"]);
