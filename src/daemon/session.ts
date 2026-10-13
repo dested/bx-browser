@@ -36,7 +36,7 @@ import {
 import { ACTION_LOG_CAP, ActionLog } from "./actionLog.ts";
 import { distillPage, renderEls, type DistillResult } from "./distill.ts";
 import { seedOsPasswordCheck } from "./osPassword.ts";
-import { jsProgram } from "./serialize.ts";
+import { jsFunctionSource, jsProgram } from "./serialize.ts";
 import {
   RingBuffer,
   attachObservers,
@@ -196,6 +196,28 @@ function noOption(want: string, stable: string, labels: string[]): { code: "targ
       ? `no option "${want}" in "${stable}"; options: ${listed}${more}`
       : `no option "${want}" in "${stable}"; it shows no options`,
   };
+}
+
+// wait --idle: how long the network and DOM must both stay quiet.
+const IDLE_MS = 500;
+// Requests that stay open by design never count against idle.
+const LONG_LIVED = new Set(["eventsource", "websocket"]);
+
+/** Every request a page has in flight (wait --idle), kept from track(). */
+interface PageNet {
+  open: Set<Request>;
+  /** Date.now() of the last start or finish. */
+  lastChange: number;
+}
+
+function waitTimeout(what: string, timeout: number): { code: "timeout"; message: string } {
+  return { code: "timeout", message: `${what} within ${timeout} ms` };
+}
+
+/** A resolution miss: the target isn't on the page (or its ref went stale). */
+function isMiss(err: unknown): boolean {
+  if (typeof err !== "object" || err === null || !("code" in err)) return false;
+  return err.code === "target_not_found" || err.code === "stale_ref";
 }
 
 /** Pixel size of a PNG or JPEG, read from its header. */
@@ -365,6 +387,8 @@ export class Session {
   private readonly startedAt = Date.now();
   /** Opened on the first /debug read of a page, never by ordinary commands. */
   private readonly metricSessions = new WeakMap<Page, Promise<CDPSession>>();
+  /** In-flight requests per page, for wait --idle. */
+  private readonly pageNet = new WeakMap<Page, PageNet>();
   /** Snapshot capture sessions (S4), separate from /debug's metric sessions. */
   private readonly snapSessions = new WeakMap<Page, Promise<CDPSession>>();
 
@@ -535,6 +559,18 @@ export class Session {
   private track(page: Page): void {
     const id = this.pageId(page);
     attachObservers(page, this.buffers);
+    const net: PageNet = { open: new Set<Request>(), lastChange: Date.now() };
+    this.pageNet.set(page, net);
+    page.on("request", (r) => {
+      if (LONG_LIVED.has(r.resourceType())) return;
+      net.open.add(r);
+      net.lastChange = Date.now();
+    });
+    const done = (r: Request): void => {
+      if (net.open.delete(r)) net.lastChange = Date.now();
+    };
+    page.on("requestfinished", done);
+    page.on("requestfailed", done);
     page.on("framenavigated", (frame) => {
       if (frame === page.mainFrame()) this.refreshTitle(page);
     });
@@ -1059,22 +1095,119 @@ export class Session {
   }
 
   async wait(cmd: CmdOf<"wait">): Promise<ActionResult> {
-    const given = [cmd.text, cmd.selector, cmd.ms].filter((v) => v !== undefined).length;
-    if (given !== 1) {
-      throw { code: "bad_request", message: "wait takes exactly one of --text, --selector, --ms" };
+    const conditions = [cmd.text, cmd.selector, cmd.ms, cmd.idle === true ? true : undefined, cmd.gone, cmd.url, cmd.js];
+    if (conditions.filter((v) => v !== undefined).length !== 1) {
+      throw {
+        code: "bad_request",
+        message: "wait takes exactly one of --text, --selector, --ms, --idle, --gone, --url, --js",
+      };
     }
     const timeout = cmd.timeoutMs ?? BUDGET.DEFAULT_TIMEOUT_MS;
     // The wait is its own settle: the caller named what to wait for.
     return this.runAction(null, cmd.tab, async (page) => {
+      step("wait");
       if (cmd.ms !== undefined) {
         await sleep(Math.min(cmd.ms, 30000));
       } else if (cmd.text !== undefined) {
-        await page.getByText(cmd.text).first().waitFor({ state: "visible", timeout });
+        const text = cmd.text;
+        await page
+          .getByText(text)
+          .first()
+          .waitFor({ state: "visible", timeout })
+          .catch(() => {
+            throw waitTimeout(`text "${text}" was not visible`, timeout);
+          });
       } else if (cmd.selector !== undefined) {
-        await page.locator(cmd.selector).first().waitFor({ state: "visible", timeout });
+        const selector = cmd.selector;
+        await page
+          .locator(selector)
+          .first()
+          .waitFor({ state: "visible", timeout })
+          .catch(() => {
+            throw waitTimeout(`"${selector}" was not visible`, timeout);
+          });
+      } else if (cmd.idle === true) {
+        await this.waitIdle(page, timeout);
+      } else if (cmd.gone !== undefined) {
+        await this.waitGone(page, cmd.gone, timeout);
+      } else if (cmd.url !== undefined) {
+        const want = cmd.url;
+        await this.poll(timeout, async () => page.url().includes(want), () => `the URL never contained "${want}" (it is ${page.url()})`);
+      } else if (cmd.js !== undefined) {
+        const source = `(async () => !!(await ${jsFunctionSource(cmd.js)}()))()`;
+        let lastError = "";
+        await this.poll(
+          timeout,
+          async () => {
+            try {
+              const truthy = await page.evaluate<unknown>(source);
+              lastError = "";
+              return truthy === true;
+            } catch (err) {
+              // Mid-navigation the context is gone; anything else is worth reporting.
+              const first = (errorMessage(err).split("\n")[0] ?? "").replace(/^page\.evaluate: /, "");
+              lastError = CONTEXT_GONE.test(errorMessage(err)) ? "" : first;
+              return false;
+            }
+          },
+          () => `${cmd.js} never became truthy${lastError ? ` (last error: ${lastError})` : ""}`,
+        );
       }
       return { text: "waited" };
     }, 0);
+  }
+
+  /** Polls `check` every 100 ms; `timeout` naming the condition when it never holds. */
+  private async poll(timeout: number, check: () => Promise<boolean>, describe: () => string): Promise<void> {
+    const deadline = Date.now() + timeout;
+    for (;;) {
+      if (await check()) return;
+      if (Date.now() >= deadline) throw waitTimeout(describe(), timeout);
+      await sleep(100);
+    }
+  }
+
+  /** wait --idle: no request of any kind in flight and the DOM quiet, both for IDLE_MS. */
+  private async waitIdle(page: Page, timeout: number): Promise<void> {
+    const net = this.pageNet.get(page);
+    const deadline = Date.now() + timeout;
+    const left = (): number => deadline - Date.now();
+    while (left() > 0) {
+      if (net && net.open.size > 0) {
+        await sleep(Math.min(50, left()));
+        continue;
+      }
+      let quiet = false;
+      try {
+        quiet = (await page.evaluate(domQuiet, { quietMs: IDLE_MS, capMs: left() })).quiet;
+      } catch (err) {
+        if (!CONTEXT_GONE.test(errorMessage(err))) throw err;
+        continue;
+      }
+      if (quiet && (!net || (net.open.size === 0 && Date.now() - net.lastChange >= IDLE_MS))) return;
+    }
+    const busy = net ? net.open.size : 0;
+    throw waitTimeout(`the page never went idle (${busy} request${busy === 1 ? "" : "s"} in flight)`, timeout);
+  }
+
+  /** wait --gone: the target resolves to nothing visible. */
+  private async waitGone(page: Page, target: Target, timeout: number): Promise<void> {
+    let stable = "";
+    await this.poll(
+      timeout,
+      async () => {
+        let resolved: Resolved;
+        try {
+          resolved = await this.resolveTarget(page, target);
+        } catch (err) {
+          if (isMiss(err)) return true;
+          throw err;
+        }
+        stable = resolved.stable;
+        return !(await resolved.locator.isVisible());
+      },
+      () => `"${stable}" was still visible`,
+    );
   }
 
   async expect(cmd: CmdOf<"expect">): Promise<ExpectResult> {
