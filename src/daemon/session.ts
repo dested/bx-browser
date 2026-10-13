@@ -286,6 +286,12 @@ export class Session {
     return this.context !== null && !this.dead;
   }
 
+  /** The active page's tab id without touching the page (log lines). */
+  get activeTabId(): number | undefined {
+    const page = this.context?.pages()[this.activeIndex];
+    return page ? this.pageId(page) : undefined;
+  }
+
   // -------------------------------------------------------------------------
   // Browser lifecycle
   // -------------------------------------------------------------------------

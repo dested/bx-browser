@@ -119,6 +119,19 @@ function fail(error: BxError): CmdResult<never> {
   return { ok: false, error };
 }
 
+/** The tab a result describes (ActionResult, OpenResult, DriveResult), for the log. */
+function resultTab(data: unknown): number | undefined {
+  if (typeof data !== "object" || data === null || !("page" in data)) return undefined;
+  const page = data.page;
+  if (typeof page !== "object" || page === null || !("id" in page)) return undefined;
+  return typeof page.id === "number" ? page.id : undefined;
+}
+
+function resultSettle(data: unknown): number | undefined {
+  if (typeof data !== "object" || data === null || !("settledMs" in data)) return undefined;
+  return typeof data.settledMs === "number" ? data.settledMs : undefined;
+}
+
 const DEADLINE_MIN_MS = 1000;
 const DEADLINE_MAX_MS = 600_000;
 
@@ -333,19 +346,24 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     const id = journal.begin(cmd, parseClientTag(req.headers[CLIENT_HEADER]));
     let failure: BxError | null = null;
     const relaunchesBefore = session.relaunches;
+    const startedAt = Date.now();
+    const pinned = "tab" in cmd ? cmd.tab : undefined;
     try {
       const tracker = { label: cmd.cmd };
       const work = steps.run(tracker, () => dispatch(cmd));
       const limit = deadlineFor(cmd, req.headers[DEADLINE_HEADER]);
       const data = limit === null ? await work : await withDeadline(work, limit, tracker);
-      log(`${cmd.cmd} ok`);
+      const tab = pinned ?? resultTab(data) ?? session.activeTabId;
+      const settled = resultSettle(data);
+      log(`${cmd.cmd} ok ${Date.now() - startedAt}ms${tab === undefined ? "" : ` tab=${tab}`}${settled === undefined ? "" : ` settle=${settled}ms`}`);
       const envelope: CmdResult = { ok: true, data };
       if (session.relaunches > relaunchesBefore) envelope.relaunched = true;
       sendJson(res, envelope);
     } catch (err) {
       await session.noteFailure(err);
       failure = toBxError(err);
-      log(`${cmd.cmd} failed: ${failure.code} ${failure.message}`);
+      const tab = pinned ?? session.activeTabId;
+      log(`${cmd.cmd} failed: ${failure.code} ${failure.message} (${Date.now() - startedAt}ms${tab === undefined ? "" : ` tab=${tab}`})`);
       sendJson(res, fail(failure));
     } finally {
       journal.end(id, failure);
