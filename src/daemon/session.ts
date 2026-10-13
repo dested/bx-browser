@@ -379,6 +379,119 @@ function noOption(want: string, stable: string, labels: string[]): { code: "targ
   };
 }
 
+/**
+ * In-page (C6, text --md): the rendered text under `root` as compact markdown:
+ * `#` headings, `- ` list items, `[text](href)` links, a blank line between
+ * blocks, everything else inline. Hidden subtrees are skipped; the walk stops
+ * once `max` characters are out.
+ */
+function toMarkdown(root: Element, max: number): { text: string; truncated: boolean } {
+  const SKIP = new Set(["script", "style", "noscript", "template", "svg", "canvas", "iframe", "head", "select", "option"]);
+  const BLOCK = new Set([
+    "address", "article", "aside", "blockquote", "body", "dd", "details", "dialog", "div", "dl", "dt", "fieldset",
+    "figcaption", "figure", "footer", "form", "header", "hr", "main", "nav", "ol", "p", "section", "summary",
+    "table", "tbody", "thead", "tfoot", "tr", "ul", "br",
+  ]);
+  // Inline controls whose text would otherwise run into the next word.
+  const SPACED = new Set(["button", "label", "td", "th", "img", "input"]);
+  const blocks: string[] = [];
+  let size = 0;
+  let line = "";
+  let inLink = false;
+  const flush = (): void => {
+    // A list item keeps its nesting indent; a table row drops its last " | ".
+    const indent = /^( *)- /.exec(line)?.[1] ?? "";
+    const t = line.replace(/\s+/g, " ").trim().replace(/\s*\|$/, "");
+    line = "";
+    if (t.length === 0 || /^(#+|-)$/.test(t)) return;
+    blocks.push(indent + t);
+    size += indent.length + t.length + 2;
+  };
+  const hrefOf = (a: HTMLAnchorElement): string | null => {
+    const raw = a.getAttribute("href") ?? "";
+    if (raw === "" || raw.startsWith("javascript:")) return null;
+    try {
+      const url = new URL(a.href);
+      return url.origin === location.origin ? `${url.pathname}${url.search}${url.hash}` : url.href;
+    } catch {
+      return raw;
+    }
+  };
+  const walk = (node: Node, depth: number): void => {
+    if (size > max) return;
+    if (node.nodeType === Node.TEXT_NODE) {
+      line += node.textContent ?? "";
+      return;
+    }
+    if (!(node instanceof HTMLElement)) return;
+    const tag = node.tagName.toLowerCase();
+    if (SKIP.has(tag)) return;
+    // display: contents has no box of its own, but its children render.
+    if (!node.checkVisibility() && getComputedStyle(node).display !== "contents") return;
+    const role = node.getAttribute("role");
+    const heading = /^h[1-6]$/.test(tag) ? Number(tag.slice(1)) : role === "heading" ? Number(node.getAttribute("aria-level") ?? "2") || 2 : 0;
+    const kids = (d: number): void => {
+      for (const child of node.childNodes) walk(child, d);
+    };
+    if (inLink) {
+      kids(depth);
+      line += " ";
+      return;
+    }
+    if (tag === "a" && node instanceof HTMLAnchorElement && hrefOf(node) !== null) {
+      const start = line.length;
+      inLink = true;
+      kids(depth);
+      inLink = false;
+      const inner = line.slice(start).replace(/\s+/g, " ").trim();
+      line = line.slice(0, start) + (inner ? ` [${inner}](${hrefOf(node)}) ` : " ");
+      return;
+    }
+    if (heading > 0) {
+      flush();
+      line = `${"#".repeat(Math.min(6, heading))} `;
+      kids(depth);
+      flush();
+      return;
+    }
+    if (tag === "li" || role === "listitem") {
+      flush();
+      line = `${"  ".repeat(depth)}- `;
+      kids(depth + 1);
+      flush();
+      return;
+    }
+    if (tag === "pre") {
+      flush();
+      const code = `\`\`\`\n${node.innerText.replace(/\n+$/, "")}\n\`\`\``;
+      blocks.push(code);
+      size += code.length + 2;
+      return;
+    }
+    if (BLOCK.has(tag)) {
+      flush();
+      kids(depth);
+      flush();
+      return;
+    }
+    if (SPACED.has(tag)) line += " ";
+    if (tag === "img") line += node.getAttribute("alt") ?? "";
+    kids(depth);
+    if (SPACED.has(tag)) line += tag === "td" || tag === "th" ? " | " : " ";
+  };
+  walk(root, 0);
+  flush();
+  // List items sit one per line; any other boundary is a blank line.
+  let text = "";
+  blocks.forEach((b, i) => {
+    const prev = blocks[i - 1];
+    const tight = prev !== undefined && /^\s*- /.test(prev) && /^\s*- /.test(b);
+    text += i === 0 ? b : tight ? `\n${b}` : `\n\n${b}`;
+  });
+  const truncated = text.length > max;
+  return { text: truncated ? text.slice(0, max) : text, truncated };
+}
+
 // wait --idle: how long the network and DOM must both stay quiet.
 const IDLE_MS = 500;
 // Requests that stay open by design never count against idle.
@@ -1633,12 +1746,47 @@ export class Session {
     return this.readText(page, cmd);
   }
 
-  private async readText(page: Page, opts: { selector?: string }): Promise<TextResult> {
-    const locator = opts.selector ? page.locator(opts.selector).first() : page.locator("body");
+  /**
+   * C6: `target` (or the legacy selector) picks the element; without one, the
+   * page's main content (`main`, else `[role=main]`), else body. `md` keeps
+   * headings, list items and links as compact markdown.
+   */
+  private async readText(
+    page: Page,
+    opts: { selector?: string; target?: Target; md?: boolean; timeoutMs?: number },
+  ): Promise<TextResult> {
+    const timeout = opts.timeoutMs ?? BUDGET.DEFAULT_TIMEOUT_MS;
+    const target: Target | undefined = opts.target ?? (opts.selector ? { selector: opts.selector } : undefined);
+    const read = async (locator: Locator): Promise<TextResult> => {
+      if (opts.md === true) return locator.evaluate(toMarkdown, BUDGET.TEXT_MAX_CHARS, { timeout });
+      const raw = (await locator.innerText({ timeout })).replace(/\n{3,}/g, "\n\n");
+      const truncated = raw.length > BUDGET.TEXT_MAX_CHARS;
+      return { text: truncated ? raw.slice(0, BUDGET.TEXT_MAX_CHARS) : raw, truncated };
+    };
+    if (target) {
+      const { locator, stable } = await this.resolveTarget(page, target);
+      step("read text");
+      try {
+        return await read(locator);
+      } catch (err) {
+        // A selector (or testid, label) that matches nothing only shows here.
+        if (!/Timeout \d+ms exceeded/.test(errorMessage(err))) throw err;
+        throw {
+          code: "target_not_found",
+          message: `no element matching "${stable}" within ${timeout} ms`,
+          nearMatches: await this.nearMatches(page, stable),
+        };
+      }
+    }
+    step("find main content");
+    const main = await this.firstPresent([page.locator("main"), page.locator('[role="main"]')]);
     step("read text");
-    const raw = (await locator.innerText({ timeout: BUDGET.DEFAULT_TIMEOUT_MS })).replace(/\n{3,}/g, "\n\n");
-    const truncated = raw.length > BUDGET.TEXT_MAX_CHARS;
-    return { text: truncated ? raw.slice(0, BUDGET.TEXT_MAX_CHARS) : raw, truncated };
+    if (main) {
+      const text = await read(main);
+      // An empty <main> (content rendered elsewhere) is no reason to return nothing.
+      if (text.text.trim().length > 0) return text;
+    }
+    return read(page.locator("body"));
   }
 
   // A pinned caller sees only its tab unless it asks for allTabs; unpinned
