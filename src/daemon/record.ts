@@ -10,6 +10,7 @@
 // bundle is built by shelling out to `bun scripts/build-harness.ts`.
 
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { copyFile, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -203,9 +204,32 @@ async function ensureHarnessBundle(): Promise<void> {
 // Routes
 // ---------------------------------------------------------------------------
 
-const HARNESS_HTML =
-  '<!doctype html><meta charset="utf-8"><title>bx distill</title>' +
-  '<pre id="log"></pre><script type="module" src="/harness.js"></script>';
+/**
+ * The harness page. The routes have no token, so each distill gets a nonce
+ * (O5) that every /harness* request must carry as `?n=`. The bundle's own
+ * fetches take it from a fetch wrapper installed before the bundle loads.
+ */
+export function harnessHtml(nonce: string): string {
+  const n = JSON.stringify(nonce);
+  return (
+    '<!doctype html><meta charset="utf-8"><title>bx distill</title><pre id="log"></pre>' +
+    `<script>(() => { const n = ${n}; const f = window.fetch.bind(window);` +
+    ' window.fetch = (input, init) => f(typeof input === "string" && input.startsWith("/harness")' +
+    ' ? input + (input.includes("?") ? "&" : "?") + "n=" + encodeURIComponent(n) : input, init); })();</script>' +
+    `<script type="module" src="/harness.js?n=${encodeURIComponent(nonce)}"></script>`
+  );
+}
+
+/** Wraps a harness route so a request without this distill's nonce gets a 404. */
+export function requireNonce(
+  nonce: string,
+  handler: (req: Request) => Promise<Response>,
+): (req: Request) => Promise<Response> {
+  return async (req) => {
+    if (new URL(req.url).searchParams.get("n") !== nonce) return new Response("not found", { status: 404 });
+    return handler(req);
+  };
+}
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -276,7 +300,6 @@ export async function recordStart(session: Session, slug: string): Promise<Recor
     `${slug}-${Date.now().toString(36)}`,
   );
   await mkdir(videoTmpDir, { recursive: true });
-
   // NOTE: the persistent console window that appears during a record is
   // Playwright's own recordVideo ffmpeg encoder — bx cannot pass windowsHide
   // into that internal spawn. The real fix is to drop recordVideo and capture
@@ -285,7 +308,12 @@ export async function recordStart(session: Session, slug: string): Promise<Recor
   // (record one known tab instead of "record every page then guess"). See
   // decisions.md. Not done here — this task keeps recordVideo and selects the
   // driven tab by action activity in recordStop.
-  await session.relaunch({ recordVideo: { dir: videoTmpDir, size: VIDEO_SIZE } });
+  try {
+    await session.relaunch({ recordVideo: { dir: videoTmpDir, size: VIDEO_SIZE } });
+  } catch (err) {
+    await rm(videoTmpDir, { recursive: true, force: true }).catch(() => undefined);
+    throw err;
+  }
 
   const actionLogStartIndex = session.actions.nextIndex;
   // The capped log must not trim this recording's transcript away mid-take.
@@ -303,7 +331,22 @@ export async function recordStart(session: Session, slug: string): Promise<Recor
 export async function recordStop(session: Session, outDir: string): Promise<RecordStopResult> {
   const current = state;
   if (!current) throw { code: "not_recording", message: "not recording" };
+  try {
+    return await finishRecording(session, current, outDir);
+  } finally {
+    state = null;
+    for (const route of Object.keys(harnessRoutes)) delete harnessRoutes[route];
+    // The webm was copied into the package (or the stop failed); either way
+    // the scratch dir would otherwise accumulate a full recording per run.
+    await rm(current.videoTmpDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
 
+async function finishRecording(
+  session: Session,
+  current: RecordingState,
+  outDir: string,
+): Promise<RecordStopResult> {
   // 1. The action log for this recording becomes the transcript. Once copied,
   //    the log may trim again.
   const entries = session.actions.since(current.actionLogStartIndex);
@@ -343,7 +386,6 @@ export async function recordStop(session: Session, outDir: string): Promise<Reco
 
   const selection = selectRecordedVideo(candidates, actionsByTab);
   if (!selection.ok) {
-    state = null;
     if (selection.reason === "wrong-tab") {
       throw {
         code: "internal",
@@ -369,17 +411,21 @@ export async function recordStop(session: Session, outDir: string): Promise<Reco
 
   let finished = false;
   let failure: string | null = null;
+  const nonce = randomUUID();
+  const route = (pathname: string, handler: (req: Request) => Promise<Response>): void => {
+    harnessRoutes[pathname] = requireNonce(nonce, handler);
+  };
 
-  harnessRoutes["/harness"] = async () =>
-    new Response(HARNESS_HTML, { headers: { "content-type": "text/html; charset=utf-8" } });
-  harnessRoutes["/harness.js"] = async () =>
+  route("/harness", async () =>
+    new Response(harnessHtml(nonce), { headers: { "content-type": "text/html; charset=utf-8" } }));
+  route("/harness.js", async () =>
     new Response(new Uint8Array(bundle), {
       headers: { "content-type": "text/javascript; charset=utf-8" },
-    });
-  harnessRoutes["/harness/video"] = async () =>
-    new Response(new Uint8Array(video), { headers: { "content-type": "video/webm" } });
-  harnessRoutes["/harness/meta"] = async () => json({ title: current.slug, segments });
-  harnessRoutes["/harness/result"] = async (req) => {
+    }));
+  route("/harness/video", async () =>
+    new Response(new Uint8Array(video), { headers: { "content-type": "video/webm" } }));
+  route("/harness/meta", async () => json({ title: current.slug, segments }));
+  route("/harness/result", async (req) => {
     const body = parseResultBody(await req.json());
     if (!body) return json({ ok: false, error: "bad result body" }, 400);
     const target = safeJoin(outDir, body.path);
@@ -387,15 +433,15 @@ export async function recordStop(session: Session, outDir: string): Promise<Reco
     await mkdir(path.dirname(target), { recursive: true });
     await writeFile(target, Buffer.from(body.base64, "base64"));
     return json({ ok: true });
-  };
-  harnessRoutes["/harness/done"] = async () => {
+  });
+  route("/harness/done", async () => {
     finished = true;
     return json({ ok: true });
-  };
-  harnessRoutes["/harness/error"] = async (req) => {
+  });
+  route("/harness/error", async (req) => {
     failure = messageOf(await req.json());
     return json({ ok: true });
-  };
+  });
 
   const relaunched = session.liveContext;
   if (!relaunched) throw { code: "internal", message: "browser is not running after relaunch" };
@@ -410,7 +456,7 @@ export async function recordStop(session: Session, outDir: string): Promise<Reco
 
   const reportPath = path.join(outDir, "report.md");
   try {
-    await page.goto(`http://127.0.0.1:${port}/harness`, {
+    await page.goto(`http://127.0.0.1:${port}/harness?n=${encodeURIComponent(nonce)}`, {
       waitUntil: "domcontentloaded",
       timeout: 30_000,
     });
@@ -433,11 +479,6 @@ export async function recordStop(session: Session, outDir: string): Promise<Reco
     }
   } finally {
     await page.close().catch(() => undefined);
-    for (const route of Object.keys(harnessRoutes)) delete harnessRoutes[route];
-    state = null;
-    // The webm has been copied into the package; the scratch dir would
-    // otherwise accumulate a full recording per run.
-    await rm(current.videoTmpDir, { recursive: true, force: true }).catch(() => undefined);
   }
 
   log(`recording "${current.slug}" distilled → ${outDir}`);

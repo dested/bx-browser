@@ -7,6 +7,8 @@
 import { expect, test } from "bun:test";
 
 import {
+  harnessHtml,
+  requireNonce,
   selectRecordedVideo,
   tallyActionsByTab,
   type VideoCandidate,
@@ -115,4 +117,25 @@ test("a single zero-byte video → no-video, not wrong-tab", () => {
   expect(selection.ok).toBe(false);
   if (selection.ok) throw new Error("expected no-video");
   expect(selection.reason).toBe("no-video");
+});
+
+// ---------------------------------------------------------------------------
+// Harness nonce (O5)
+// ---------------------------------------------------------------------------
+
+test("harness routes answer only requests carrying the distill's nonce", async () => {
+  const route = requireNonce("abc-123", async () => new Response("ok"));
+  expect((await route(new Request("http://127.0.0.1/harness/meta"))).status).toBe(404);
+  expect((await route(new Request("http://127.0.0.1/harness/meta?n=wrong"))).status).toBe(404);
+  const ok = await route(new Request("http://127.0.0.1/harness/meta?n=abc-123"));
+  expect(ok.status).toBe(200);
+  expect(await ok.text()).toBe("ok");
+});
+
+test("the harness page loads its bundle with the nonce and adds it to every /harness fetch", () => {
+  const html = harnessHtml("abc-123");
+  expect(html).toContain(`src="/harness.js?n=abc-123"`);
+  expect(html).toContain(`const n = "abc-123"`);
+  // The wrapper runs before the module script.
+  expect(html.indexOf("window.fetch =")).toBeLessThan(html.indexOf('type="module"'));
 });
