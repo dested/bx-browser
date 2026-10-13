@@ -6,7 +6,7 @@
 //
 //   bun src/bench/bench.ts --agent-suite [--tier haiku[,sonnet,opus,ladder]]
 //     [--tasks <n>|<id,id,…>] [--repeat <n>] [--budget <usd>] [--max-wall <s>]
-//     [--profile <p>] [--headed] [--max-total <usd>]
+//     [--profile <p>] [--headed] [--max-total <usd>] [--commit <sha>]
 //
 // --max-total stops the suite once the summed estimate crosses it; the
 // results written are then marked partial.
@@ -443,8 +443,14 @@ function summarize(runs: TaskRun[]): TierSummary {
   };
 }
 
-function commitSha(): string {
-  const r = Bun.spawnSync(["git", "rev-parse", "--short", "HEAD"], { cwd: path.join(import.meta.dir, "../..") });
+/** A git archive export has no .git: `--commit <sha>` names what was exported. */
+function commitSha(override: string | undefined): string {
+  if (override !== undefined) return override;
+  const r = Bun.spawnSync(["git", "rev-parse", "--short", "HEAD"], {
+    cwd: path.join(import.meta.dir, "../.."),
+    stdio: ["ignore", "pipe", "ignore"],
+    windowsHide: true,
+  });
   return r.exitCode === 0 ? r.stdout.toString().trim() : "unknown";
 }
 
@@ -461,6 +467,7 @@ interface SuiteArgs {
   budgetUsd: number;
   maxWallMs: number;
   maxTotalUsd: number | undefined;
+  commit: string | undefined;
 }
 
 const DEFAULT_BUDGET_USD = 1;
@@ -509,6 +516,7 @@ function parseSuiteArgs(argv: string[]): SuiteArgs {
     budgetUsd: positive("budget", DEFAULT_BUDGET_USD),
     maxWallMs: positive("max-wall", DEFAULT_MAX_WALL_S) * 1000,
     maxTotalUsd: value("max-total") === undefined ? undefined : positive("max-total", 0),
+    commit: value("commit"),
   };
 }
 
@@ -598,7 +606,7 @@ export async function runAgentSuite(argv: string[]): Promise<void> {
     date: new Date().toISOString(),
     pricesChecked: PRICES_CHECKED,
     models: MODEL_IDS,
-    commit: commitSha(),
+    commit: commitSha(args.commit),
     profile: args.profile,
     headless: args.headless,
     tasks: args.tasks.map((t) => t.id),
