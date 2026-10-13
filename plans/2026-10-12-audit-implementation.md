@@ -291,7 +291,7 @@ cli.ts and client.ts move from the lead to frontdoor for this wave. Anyone else'
 
 ## Ledger (lead, updated 2026-10-12, wave 3)
 
-Board: down · Last pushed: 2e42e9d (gate 94/94) · bx-live refreshed from 2e42e9d · `bx doctor --fix` 17 fixed, `bx gc --yes` 168 profiles / 12.70 GB
+Board: down · Last pushed: 9e79300 (gate 97/97; bx-live stays on 2e42e9d until recording V1 is whole) · bx-live refreshed from 2e42e9d · `bx doctor --fix` 17 fixed, `bx gc --yes` 168 profiles / 12.70 GB
 
 | Agent | Model | Owns | Item now | Last sha / artifact | Status |
 | --- | --- | --- | --- | --- | --- |
@@ -309,5 +309,5 @@ Background jobs: agentkit bench (its own).
 Incident 22:21–22:27: visible windows from frontdoor (dotnet publish build servers / link step, bx.exe fallback) and recorder (pwsh CPU probe without windowsHide). Fixed; Standing answer added.
 Smoke flake: Chrome intermittently drops trusted input machine-wide (core repro scratchpad\core\pw-direct3.mjs); re-run smoke once before believing click failures.
 Waiting on Sal: nothing. Later: bx.exe on PATH (ask when frontdoor's done).
-Unpushed: 548a1ab ea409d0 b32fd83 17a79cb a308c59 30817c4 + this.
+Unpushed: nothing past 9e79300.
 Profiles to delete at wrap-up (add): recorder-dev, frontdoor-dev, core-k2a1..3, core-k2b1..4, core-k2c.
