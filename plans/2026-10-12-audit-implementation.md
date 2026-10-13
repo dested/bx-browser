@@ -211,6 +211,8 @@ All optional fields; the full text is in `G:\code\bx\src\protocol.ts` once lande
 - (2026-10-12, lead) infra R2b: gc and doctor --fix never recurse into a symlink/junction; report `skipped: link`, with a unit test. Applies to: infra.
 - (2026-10-12, lead) A real `bx gc --yes` (168 profiles, 12.7 GB) needs Sal's yes; the lead may delete only core-dev, core-smoke, bxlivecheck and this run's agent profiles. Applies to: lead.
 - (2026-10-12, lead) Never run chrome.exe directly or touch Sal's own Chrome; read versions from file VersionInfo or Playwright's browser.version(). Applies to: all.
+- (2026-10-12, lead) Resolver doubt 2 reversed (C3b): only a modal (`:modal` dialog or visible aria-modal=true) scopes els; a non-modal open dialog lists first with dialog:true and keeps the background. Doubts 1 (transparent inputs stay visible), 3 (data-bx-ref attribute), 4 (browser tests under Node) accepted. Applies to: resolver.
+- (2026-10-12, lead) core order: A2 → resolver wiring (scratchpadesolver\session-wiring.txt, plus cmd.timeoutMs into resolveTarget) → C6 → G3-daemon. After wiring: resolver deletes distill.ts LEGACY; lead replaces protocol RefEntry and the cliffnotes ref gotcha. Applies to: core, resolver, lead.
 - (2026-10-12, lead) Hand-offs that touch another owner's file go to the lead as exact replacement text in a scratch file (path in the message); the lead forwards to the owner. Applies to: resolver, infra, agentkit.
 
 ## Ledger (lead, updated 2026-10-12)
@@ -220,8 +222,8 @@ Board: down · Last pushed: b3dc301 (origin/main; local main ahead, unpushed) ·
 | Agent | Model | Owns | Item now | Last sha / artifact | Status |
 | --- | --- | --- | --- | --- | --- |
 | scout | opus-xhigh | research report | Q1–Q3 | — | running |
-| core | opus-high | session.ts, daemon.ts, serialize.ts | A2 → C6 → G3-daemon → resolver wiring | …A3 f0e821b, infra-handoff e1bc41b (passed) | running |
-| resolver | opus-high | resolve.ts, distill.ts, tests/resolve.test.ts | C1 C2 C3 C8 S5 | — | running |
+| core | opus-high | session.ts, daemon.ts, serialize.ts | A2 → resolver wiring → C6 → G3-daemon | …A3 f0e821b, infra-handoff e1bc41b (passed) | running |
+| resolver | opus-high | resolve.ts, distill.ts, tests/resolve.test.ts | C3b (modal-only scoping), then LEGACY delete after wiring | 4739d97 (passed; els 6k 1,440→12 ms) | running |
 | agentkit | opus-high | src/agent/**, src/bench/** | waits on lead sha for full run | 483656a b8f4ade 132f915 (passed) | idle |
 | infra | opus-high | observe, debug, record, actionLog, orphans, maintenance, flows | all done: O1 O1b O5 D1 D3 D4 F1 F2 F3 R2 R2b | …d66e5a7 aa00266 e7338f8 (passed) | stopped |
 | lead | — | cli, client, protocol, constants, script | doctor/gc wired; agentkit + infra handoffs | 98a40d2 | next: resolver wiring forward, gate |
