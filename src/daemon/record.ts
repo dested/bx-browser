@@ -93,6 +93,8 @@ interface Recording {
   tab: number;
   tabs: TabSpan[];
   capture: PageScreencast;
+  /** Every capture (the first and each follow re-target) feeds frames here. */
+  onFrame: (frame: Frame) => void;
   sink: Sink;
   tmpDir: string;
   marks: Mark[];
@@ -535,9 +537,6 @@ export async function recordStart(
 }
 
 async function beginRecording(session: Session, slug: string, opts: RecordStartOptions): Promise<RecordStartResult> {
-  if (opts.follow === true) {
-    throw { code: "bad_request", message: "--follow is not wired yet (waits on the session hook, K4)" };
-  }
   const ffmpeg = await ensureFfmpeg();
   const { page, tab } = await recordedPage(session, opts.tab);
 
@@ -578,7 +577,7 @@ async function beginRecording(session: Session, slug: string, opts: RecordStartO
     session.actions.holdFrom(holdIndex);
     const recording: Recording = {
       slug,
-      follow: false,
+      follow: opts.follow === true,
       fps,
       ring,
       ffmpeg,
@@ -587,6 +586,7 @@ async function beginRecording(session: Session, slug: string, opts: RecordStartO
       tab,
       tabs: [{ tab, at: got.at }],
       capture,
+      onFrame,
       sink,
       tmpDir,
       marks: [],
@@ -595,6 +595,11 @@ async function beginRecording(session: Session, slug: string, opts: RecordStartO
       cleanups: [],
     };
     watchClose(recording, page);
+    if (recording.follow) {
+      // The hook fires inside session bookkeeping; act once it has settled.
+      const off = session.onActiveChange(() => queueMicrotask(() => followActive(session, recording)));
+      recording.cleanups.push(off);
+    }
     if (ring !== null) {
       const timer = setInterval(() => ringUpkeep(session, recording), RING_UPKEEP_MS);
       timer.unref();
@@ -614,6 +619,31 @@ async function beginRecording(session: Session, slug: string, opts: RecordStartO
     await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
     throw err;
   }
+}
+
+/**
+ * --follow: move the capture to the active tab. Re-targets queue on the
+ * recording's chain so two quick tab switches can't interleave, and stop
+ * waits for the last one. The gap between the old capture and the new one is
+ * about a millisecond; a still page opens on a screenshot (capturePage).
+ */
+function followActive(session: Session, rec: Recording): void {
+  rec.chain = rec.chain
+    .then(async () => {
+      if (state !== rec) return;
+      // activeTabId re-picks a fallback when the active tab just closed.
+      const id = session.activeTabId;
+      if (id === undefined || (id === rec.tab && !rec.capture.stopped)) return;
+      const page = session.liveContext?.pages().find((p) => session.tabIdOf(p) === id);
+      if (!page || page.isClosed()) return;
+      await rec.capture.stop();
+      rec.capture = await capturePage(session, page, rec.size, rec.onFrame);
+      rec.tab = id;
+      rec.tabs.push({ tab: id, at: Date.now() });
+      watchClose(rec, page);
+      log(`recording "${rec.slug}" follows tab ${id}`);
+    })
+    .catch((err: unknown) => log(`recording "${rec.slug}": follow failed: ${errorText(err)}`));
 }
 
 /** A recorded tab that closes ends its stream with a mark; the video holds its last frame. */

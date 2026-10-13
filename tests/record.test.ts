@@ -4,6 +4,19 @@
 //   bun test tests/record.test.ts
 
 import { expect, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import { cmd, ensureDaemon, stopDaemon } from "../src/client.ts";
+import type {
+  Cmd,
+  JsResult,
+  RecordStartResult,
+  RecordStatusResult,
+  RecordStopResult,
+  TabsResult,
+} from "../src/protocol.ts";
 
 import { actionLogWording, isRewordedFile, isVideoCopy } from "../src/daemon/harness/wording.ts";
 import {
@@ -147,3 +160,147 @@ test("parsePackageMeta reads a package's slug, duration and timed lines", () => 
   expect(parsePackageMeta({ slug: "x" })).toBeNull();
   expect(parsePackageMeta(null)).toBeNull();
 });
+
+// ---------------------------------------------------------------------------
+// Live: a real daemon on your own profile. Skipped unless BX_RECORD_LIVE names
+// the profile (never "default"):
+//
+//   BX_RECORD_LIVE=recorder-dev bun test tests/record.test.ts
+// ---------------------------------------------------------------------------
+
+const LIVE = process.env.BX_RECORD_LIVE;
+const live = test.skipIf(LIVE === undefined || LIVE === "" || LIVE === "default");
+const LIVE_MS = 90_000;
+
+async function liveCmd<T>(c: Cmd): Promise<T> {
+  const res = await cmd<T>(LIVE ?? "", c);
+  if (!res.ok) throw new Error(`${c.cmd} failed: ${res.error.code} — ${res.error.message}`);
+  return res.data;
+}
+
+/** Waits until no package is still distilling. */
+async function distilled(): Promise<void> {
+  const deadline = Date.now() + 60_000;
+  while ((await liveCmd<RecordStatusResult>({ cmd: "recordStatus" })).distilling.length > 0) {
+    if (Date.now() > deadline) throw new Error("distill still running after 60 s");
+    await Bun.sleep(250);
+  }
+}
+
+function isWebm(file: string): boolean {
+  const head = readFileSync(file).subarray(0, 4);
+  return head.equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]));
+}
+
+let liveOut = "";
+let loginTab = 0;
+let otherTab = 0;
+
+live("live: setup — the fixture login with a typed value, and a second tab", async () => {
+  await stopDaemon(LIVE ?? "");
+  const run = await ensureDaemon(LIVE ?? "", { headless: true });
+  liveOut = mkdtempSync(path.join(os.tmpdir(), "bx-record-"));
+  await liveCmd({ cmd: "open", url: `http://127.0.0.1:${run.port}/fixture/#/login` });
+  await liveCmd({ cmd: "fill", target: { testid: "email" }, value: "typed@record.test" });
+  await liveCmd({ cmd: "js", expression: "window.__kept = 42" });
+  const tabs = await liveCmd<TabsResult>({ cmd: "tabNew", background: true });
+  otherTab = tabs.created?.id ?? 0;
+  loginTab = tabs.pages.find((p) => p.active)?.id ?? 0;
+  expect(otherTab).toBeGreaterThan(0);
+  expect(loginTab).toBeGreaterThan(0);
+}, LIVE_MS);
+
+live("live: start/mark/stop keeps tabs and typed state; the package lands, report in the background", async () => {
+  const start = await liveCmd<RecordStartResult>({ cmd: "recordStart", slug: "live-basic" });
+  expect(start.tab).toBe(loginTab);
+  expect(start.firstFrameMs).toBeLessThan(1000);
+  await liveCmd({ cmd: "fill", target: { testid: "password" }, value: "hunter2" });
+  const marked = await liveCmd<RecordStatusResult>({ cmd: "recordMark", text: "after the password" });
+  expect(marked.marks).toBe(1);
+  await liveCmd({ cmd: "press", key: "Tab" });
+  await Bun.sleep(500);
+
+  const dir = path.join(liveOut, "live-basic");
+  const t = performance.now();
+  const stop = await liveCmd<RecordStopResult>({ cmd: "recordStop", outDir: dir });
+  expect(performance.now() - t).toBeLessThan(2000);
+  expect(stop.distill).toBe("running");
+  expect(isWebm(stop.videoPath)).toBe(true);
+  const transcript = readFileSync(stop.transcriptPath, "utf8");
+  expect(transcript).toContain("— mark: after the password");
+  expect(transcript).toContain("pressed Tab");
+
+  await distilled();
+  const report = readFileSync(stop.reportPath, "utf8");
+  expect(report).not.toMatch(/spoken|speaker|speech/i);
+  expect(existsSync(path.join(dir, "rec-01", "walkthrough.webm"))).toBe(false);
+
+  const tabs = await liveCmd<TabsResult>({ cmd: "tabs" });
+  expect(tabs.pages.map((p) => p.id)).toEqual([loginTab, otherTab]);
+  const value = await liveCmd<JsResult>({ cmd: "js", expression: "document.querySelector('[data-testid=email]').value + ' ' + window.__kept" });
+  expect(value.value).toBe(JSON.stringify("typed@record.test 42"));
+}, LIVE_MS);
+
+live("live: ring mode saves the last seconds while capture goes on", async () => {
+  const start = await liveCmd<RecordStartResult>({ cmd: "recordStart", slug: "live-ring", ring: 30 });
+  expect(start.ring).toBe(30);
+  for (let i = 0; i < 4; i++) {
+    await liveCmd({ cmd: "fill", target: { testid: "password" }, value: `pw-${i}` });
+    await Bun.sleep(600);
+  }
+  const save = await liveCmd<RecordStopResult>({ cmd: "recordSave", lastSecs: 1, outDir: path.join(liveOut, "live-ring-save") });
+  expect(save.durationMs).toBeLessThanOrEqual(1100);
+  expect(isWebm(save.videoPath)).toBe(true);
+  const status = await liveCmd<RecordStatusResult>({ cmd: "recordStatus" });
+  expect(status.recording).toBe(true);
+  expect(status.bufferedBytes ?? 0).toBeGreaterThan(0);
+  const stop = await liveCmd<RecordStopResult>({ cmd: "recordStop", outDir: path.join(liveOut, "live-ring") });
+  expect(stop.durationMs).toBeGreaterThan(2000);
+  expect(readFileSync(stop.transcriptPath, "utf8")).toContain("pw-3");
+  await distilled();
+}, LIVE_MS);
+
+live("live: --follow moves the capture with the active tab", async () => {
+  await liveCmd({ cmd: "recordStart", slug: "live-follow", follow: true });
+  await liveCmd({ cmd: "tabSelect", index: 1 });
+  await Bun.sleep(300);
+  expect((await liveCmd<RecordStatusResult>({ cmd: "recordStatus" })).tab).toBe(otherTab);
+  await liveCmd({ cmd: "tabSelect", index: 0 });
+  await Bun.sleep(300);
+  const stop = await liveCmd<RecordStopResult>({ cmd: "recordStop", outDir: path.join(liveOut, "live-follow") });
+  const meta: unknown = JSON.parse(readFileSync(stop.metaPath, "utf8"));
+  const tabs = typeof meta === "object" && meta !== null && "tabs" in meta && Array.isArray(meta.tabs) ? meta.tabs : [];
+  expect(tabs.map((span: unknown) => (typeof span === "object" && span !== null && "tab" in span ? span.tab : null))).toEqual([
+    loginTab,
+    otherTab,
+    loginTab,
+  ]);
+  await distilled();
+}, LIVE_MS);
+
+live("live: a recorded tab that closes ends with a mark; stop still packages", async () => {
+  const tabs = await liveCmd<TabsResult>({ cmd: "tabNew", background: true });
+  const doomed = tabs.created?.id ?? 0;
+  await liveCmd({ cmd: "recordStart", slug: "live-closed", tab: doomed });
+  await liveCmd({ cmd: "tabClose", tab: doomed });
+  const stop = await liveCmd<RecordStopResult>({ cmd: "recordStop", outDir: path.join(liveOut, "live-closed") });
+  expect(readFileSync(stop.metaPath, "utf8")).toContain(`tab ${doomed} closed`);
+  await distilled();
+}, LIVE_MS);
+
+live("live: --mp4 writes an H.264 copy when ffmpeg has libx264, else bad_request before stopping", async () => {
+  await liveCmd({ cmd: "recordStart", slug: "live-mp4" });
+  await Bun.sleep(500);
+  const res = await cmd<RecordStopResult>(LIVE ?? "", { cmd: "recordStop", outDir: path.join(liveOut, "live-mp4"), mp4: true });
+  if (res.ok) {
+    expect(res.data.mp4Path).toBeDefined();
+    expect(existsSync(res.data.mp4Path ?? "")).toBe(true);
+  } else {
+    expect(res.error.code).toBe("bad_request");
+    // The recording survived the refusal.
+    await liveCmd({ cmd: "recordStop", outDir: path.join(liveOut, "live-mp4") });
+  }
+  await distilled();
+  await stopDaemon(LIVE ?? "");
+  rmSync(liveOut, { recursive: true, force: true });
+}, LIVE_MS);
