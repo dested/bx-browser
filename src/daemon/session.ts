@@ -236,6 +236,8 @@ export class Session {
       channel: "chrome",
       headless: this.headless,
       viewport: { width: 1280, height: 800 },
+      // 64 MB: an uncapped disk cache is most of a profile's ~84 MB.
+      args: ["--disk-cache-size=67108864"],
       ...extra,
     };
     let context: BrowserContext;
