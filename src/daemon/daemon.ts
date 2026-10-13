@@ -34,6 +34,7 @@ import {
 import { Session, steps } from "./session.ts";
 import { harnessRoutes, recordStart, recordStop, recordingSlug } from "./record.ts";
 import { collectDebug, heapSnapshot, Journal, parseClientTag, runGc } from "./debug.ts";
+import { pruneSnaps, snapDays } from "./orphans.ts";
 
 const ERROR_CODES: readonly string[] = [
   "target_not_found",
@@ -178,6 +179,11 @@ for (const dir of [RUN_DIR, PROFILES_DIR, SNAPS_DIR, LOGS_DIR]) {
   await mkdir(path.join(bxDir, dir), { recursive: true });
 }
 
+// Snaps bx named itself, older than BX_SNAP_DAYS (default 7; 0 keeps them).
+void pruneSnaps(path.join(bxDir, SNAPS_DIR)).then((r) => {
+  if (r.removed > 0) log(`pruned ${r.removed} snaps older than ${snapDays()} days (${r.bytes} bytes)`);
+});
+
 const token = randomBytes(24).toString("hex");
 const session = new Session({ profile, headless });
 const journal = new Journal();
@@ -209,6 +215,8 @@ async function dispatch(cmd: Cmd): Promise<unknown> {
       return session.consoleEntries(cmd);
     case "net":
       return session.netEntries(cmd);
+    case "netBody":
+      return session.netBody(cmd);
     case "js":
       return session.js(cmd);
     case "drive":
@@ -389,7 +397,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         recording: recordingSlug(),
         lastActivityAt: lastActivity,
         idleLimitMs: idleLimit,
-      });
+      }, { light: url.searchParams.get("light") === "1" });
       sendJson(res, { ok: true, data } satisfies CmdResult);
       return;
     }

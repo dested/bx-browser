@@ -23,6 +23,7 @@ import {
   type ElsResult,
   type ExpectResult,
   type JsResult,
+  type NetBodyResult,
   type NetEntry,
   type OpenResult,
   type PageInfo,
@@ -38,14 +39,16 @@ import { distillPage, renderEls, type DistillResult } from "./distill.ts";
 import { seedOsPasswordCheck } from "./osPassword.ts";
 import { jsFunctionSource, jsProgram } from "./serialize.ts";
 import {
-  RingBuffer,
   attachObservers,
+  createBuffers,
   markConsole,
+  netBody,
   newErrorsSince,
   queryConsole,
   queryNet,
   type Buffers,
 } from "./observe.ts";
+import { clearProfileLocks, describeClear } from "./orphans.ts";
 import { recordingSlug } from "./record.ts";
 import type { BrowserContext, CDPSession, Locator, Page, Request } from "playwright-core";
 
@@ -344,11 +347,6 @@ const CLOSED_ERROR = /Target page, context or browser has been closed|Browser ha
 // Chrome's refusal when another process still holds the profile.
 const PROFILE_IN_USE = /Opening in existing browser session|ProcessSingleton|profile (is )?(already )?in use/i;
 
-// R2: orphans.ts — infra replaces this with the real lock sweep in phase 2.
-function clearProfileLocks(_profileDir: string): boolean {
-  return false;
-}
-
 function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   if (typeof err === "object" && err !== null && "message" in err) return String(err.message);
@@ -398,11 +396,7 @@ export class Session {
     const bx = path.join(os.homedir(), BX_DIR_NAME);
     this.profileDir = path.join(bx, PROFILES_DIR, opts.profile);
     this.snapsDir = path.join(bx, SNAPS_DIR);
-    this.buffers = {
-      console: new RingBuffer<ConsoleEntry>(BUDGET.RING_BUFFER_SIZE),
-      net: new RingBuffer<NetEntry>(BUDGET.RING_BUFFER_SIZE),
-      t0: Date.now(),
-    };
+    this.buffers = createBuffers();
   }
 
   get browserRunning(): boolean {
@@ -497,7 +491,11 @@ export class Session {
     try {
       context = await chromium.launchPersistentContext(this.profileDir, options);
     } catch (err) {
-      if (!PROFILE_IN_USE.test(errorMessage(err)) || !clearProfileLocks(this.profileDir)) throw err;
+      if (!PROFILE_IN_USE.test(errorMessage(err))) throw err;
+      // A dead daemon's Chrome still holds the profile: kill it, drop the locks, retry once.
+      const cleared = await clearProfileLocks(this.profileDir, { selfPid: process.pid });
+      console.log(`[${new Date().toISOString()}] ${describeClear(this.profileDir, cleared)}`);
+      if (!cleared.cleared) throw err;
       context = await chromium.launchPersistentContext(this.profileDir, options);
     }
     this.context = context;
@@ -558,7 +556,7 @@ export class Session {
 
   private track(page: Page): void {
     const id = this.pageId(page);
-    attachObservers(page, this.buffers);
+    attachObservers(page, this.buffers, id);
     const net: PageNet = { open: new Set<Request>(), lastChange: Date.now() };
     this.pageNet.set(page, net);
     page.on("request", (r) => {
@@ -733,7 +731,7 @@ export class Session {
     const result: ActionResult = {
       page: this.pageInfo(page),
       navigated,
-      consoleErrors: newErrorsSince(this.buffers.console, mark).slice(0, 5),
+      consoleErrors: newErrorsSince(this.buffers.console, mark, this.pageId(page)).slice(0, 5),
       settledMs,
     };
     // The log outlives the command: a password must not reach cmdJson.
@@ -1358,12 +1356,20 @@ export class Session {
     return { text: truncated ? raw.slice(0, BUDGET.TEXT_MAX_CHARS) : raw, truncated };
   }
 
+  // A pinned caller sees only its tab unless it asks for allTabs; unpinned
+  // (human) commands see every tab, as before.
   consoleEntries(cmd: CmdOf<"console">): ConsoleEntry[] {
-    return queryConsole(this.buffers.console, { all: cmd.all, filter: cmd.filter });
+    const tab = cmd.allTabs ? undefined : cmd.tab;
+    return queryConsole(this.buffers.console, { all: cmd.all, filter: cmd.filter, tab });
   }
 
   netEntries(cmd: CmdOf<"net">): NetEntry[] {
-    return queryNet(this.buffers.net, { failed: cmd.failed, filter: cmd.filter });
+    const tab = cmd.allTabs ? undefined : cmd.tab;
+    return queryNet(this.buffers.net, { failed: cmd.failed, filter: cmd.filter, all: cmd.all, tab });
+  }
+
+  netBody(cmd: CmdOf<"netBody">): Promise<NetBodyResult> {
+    return netBody(this.buffers, cmd.id);
   }
 
   async js(cmd: CmdOf<"js">): Promise<JsResult> {
@@ -1393,6 +1399,9 @@ export class Session {
       // The page replaced a builtin the serializer leans on.
       throw { code: "internal", message: "js: the page returned no serialized result" };
     }
+    // Flows replay every js step (synthesize.ts): it may have set state later steps need.
+    const shown = cmd.expression.replace(/\s+/g, " ").trim();
+    this.appendAction(cmd, `ran js ${shown.length > 80 ? `${shown.slice(0, 79)}…` : shown}`, undefined, this.pageId(page));
     return { value: out.json, truncated: out.truncated };
   }
 
@@ -1728,12 +1737,13 @@ export class Session {
   }
 
   /** Pages with Chrome's counters, plus the sizes of everything this session keeps. */
-  async debugInfo(): Promise<Pick<DebugResult, "pages" | "internals">> {
+  /** light: no per-page CDP session or Performance.getMetrics (metrics: null). */
+  async debugInfo(opts: { light?: boolean } = {}): Promise<Pick<DebugResult, "pages" | "internals">> {
     const pages = this.context?.pages() ?? [];
     const out = await Promise.all(
       pages.map(async (page): Promise<DebugPage> => {
         const info = this.pageInfo(page);
-        const metrics = await this.pageMetrics(page);
+        const metrics = opts.light ? null : await this.pageMetrics(page);
         return {
           tab: info.id,
           url: info.url,
