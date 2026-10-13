@@ -158,6 +158,8 @@ export class Session {
   private nextPageId = 1;
   private readonly pageIds = new WeakMap<Page, number>();
   private readonly refs = new Map<number, PageRefs>();
+  /** Per-page title (S6): navigation events and settle() keep it current. */
+  private readonly titles = new Map<number, string>();
   /** Capped; record.ts holds it during a recording (see actionLog.ts). */
   readonly actions = new ActionLog();
   private readonly buffers: Buffers;
@@ -302,8 +304,13 @@ export class Session {
   private track(page: Page): void {
     const id = this.pageId(page);
     attachObservers(page, this.buffers);
+    page.on("framenavigated", (frame) => {
+      if (frame === page.mainFrame()) this.refreshTitle(page);
+    });
+    page.on("domcontentloaded", () => this.refreshTitle(page));
     page.on("close", () => {
       this.refs.delete(id);
+      this.titles.delete(id);
       const count = this.context?.pages().length ?? 0;
       if (this.activeIndex >= count) this.activeIndex = Math.max(0, count - 1);
     });
@@ -368,20 +375,30 @@ export class Session {
     return fresh;
   }
 
-  private async pageInfo(page: Page): Promise<PageInfo> {
+  /**
+   * Title cache upkeep. Fire-and-forget: on a page stuck in a busy loop the
+   * read never answers, and nothing may wait on it.
+   */
+  private refreshTitle(page: Page): void {
+    const id = this.pageId(page);
+    page.title().then(
+      (title) => {
+        if (!page.isClosed()) this.titles.set(id, title);
+      },
+      () => undefined,
+    );
+  }
+
+  /** Pure bookkeeping: the title comes from the cache, never from the page. */
+  private pageInfo(page: Page): PageInfo {
     const pages = this.context?.pages() ?? [];
     const index = pages.indexOf(page);
-    let title = "";
-    try {
-      title = await page.title();
-    } catch {
-      // navigating or closing; the url alone is enough
-    }
+    const id = this.pageId(page);
     return {
       index: index < 0 ? 0 : index,
-      id: this.pageId(page),
+      id,
       url: page.url(),
-      title,
+      title: this.titles.get(id) ?? "",
       active: index === this.activeIndex,
     };
   }
@@ -438,7 +455,7 @@ export class Session {
     const navigated = urlBefore !== page.url();
     if (navigated) this.refsFor(page).generation++;
     const result: ActionResult = {
-      page: await this.pageInfo(page),
+      page: this.pageInfo(page),
       navigated,
       consoleErrors: newErrorsSince(this.buffers.console, mark).slice(0, 5),
     };
@@ -563,7 +580,7 @@ export class Session {
     const scan = await this.scan(page);
     this.appendAction({ cmd: "open", url }, `opened ${url}`, url, this.pageId(page));
     return {
-      page: await this.pageInfo(page),
+      page: this.pageInfo(page),
       els: { generation: this.refsFor(page).generation, ...renderEls(scan, {}) },
     };
   }
@@ -817,7 +834,7 @@ export class Session {
       this.pageId(page),
     );
 
-    return { satisfied, elapsedMs, polls, finalValue, page: await this.pageInfo(page) };
+    return { satisfied, elapsedMs, polls, finalValue, page: this.pageInfo(page) };
   }
 
   async back(cmd: CmdOf<"back">): Promise<ActionResult> {
@@ -987,7 +1004,7 @@ export class Session {
 
   async tabs(): Promise<TabsResult> {
     const context = await this.ensureContext();
-    return { pages: await Promise.all(context.pages().map((p) => this.pageInfo(p))) };
+    return { pages: context.pages().map((p) => this.pageInfo(p)) };
   }
 
   /**
@@ -1033,7 +1050,7 @@ export class Session {
     // `created` is how a pinning caller learns its tab id without racing
     // whichever tab happens to be active by the time it reads the list.
     const tabs = await this.tabs();
-    return { ...tabs, created: await this.pageInfo(page) };
+    return { ...tabs, created: this.pageInfo(page) };
   }
 
   async tabSelect(cmd: CmdOf<"tabSelect">): Promise<TabsResult> {
@@ -1089,7 +1106,7 @@ export class Session {
 
   async status(): Promise<StatusResult> {
     const pages = this.context
-      ? await Promise.all(this.context.pages().map((p) => this.pageInfo(p)))
+      ? this.context.pages().map((p) => this.pageInfo(p))
       : [];
     return {
       profile: this.profile,
@@ -1107,7 +1124,8 @@ export class Session {
     const pages = this.context?.pages() ?? [];
     const out = await Promise.all(
       pages.map(async (page): Promise<DebugPage> => {
-        const [info, metrics] = await Promise.all([this.pageInfo(page), this.pageMetrics(page)]);
+        const info = this.pageInfo(page);
+        const metrics = await this.pageMetrics(page);
         return {
           tab: info.id,
           url: info.url,
