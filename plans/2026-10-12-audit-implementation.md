@@ -295,7 +295,7 @@ Board: down · Last pushed: 2e42e9d (gate 94/94) · bx-live refreshed from 2e42e
 | Agent | Model | Owns | Item now | Last sha / artifact | Status |
 | --- | --- | --- | --- | --- | --- |
 | scout | opus-xhigh | research report | done: plans/2026-10-12-speed-research.md | ea409d0 | stopped |
-| core | opus-high | session.ts, daemon.ts, serialize.ts | K1 click fast path → K2 cold start → K3/K4 hand-offs | …C1-wire 5544ca1 (passed) | running |
+| core | opus-high | session.ts, daemon.ts, serialize.ts | waiting on K3/K4 hand-offs | K1 a308c59 (click 33→4 ms) K2 30817c4 (cold 789→684 ms) (passed) | idle |
 | resolver | opus-high | resolve.ts, distill.ts | all done | de96220 (passed) | stopped |
 | agentkit | opus-high | src/agent/**, src/bench/** | G2 full run on 2e42e9d (cap $3) → G6 numbers | 548a1ab | running |
 | infra | opus-high | observe, debug, orphans, maintenance(→lead), flows | all done | e7338f8 (passed) | stopped |
@@ -306,4 +306,5 @@ Board: down · Last pushed: 2e42e9d (gate 94/94) · bx-live refreshed from 2e42e
 Live tool: global bx → G:/code/bx-live (2e42e9d). Relink to G:/code/bx at the end.
 Background jobs: agentkit bench (its own).
 Waiting on Sal: nothing. Later: bx.exe on PATH (ask when frontdoor's done).
-Unpushed: 548a1ab, ea409d0 and this plan commit.
+Unpushed: 548a1ab ea409d0 b32fd83 17a79cb a308c59 30817c4 + this.
+Profiles to delete at wrap-up (add): recorder-dev, frontdoor-dev, core-k2a1..3, core-k2b1..4, core-k2c.
