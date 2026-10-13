@@ -17,9 +17,21 @@
 - **[heavy — ask first] Agent bench:** `bun run bench -- --agent` (or
   `bun src/bench/bench.ts --agent`) — spends real subscription tokens on a
   live Haiku run (~30k tokens).
-- **[medium] Recording e2e:** start daemon, `bx open <fixture>`,
-  `bx record start t1`, a couple of clicks, `bx record stop` — expect
-  recordings/t1/report.md + raw.webm. Needs playwright ffmpeg (auto-installed
-  on first use).
+- **[medium] Recording e2e:** on your own `--profile <p> --headless`:
+  `bx open <fixture>/#/login`, type into email, `bx tab new <fixture>`, `bx tab 0`;
+  then `bx record start t1` (answers in ~150 ms wall, "first frame in N ms"),
+  a click and a fill, `bx record mark "signed in"`, `bx record stop` (~130 ms
+  wall). Expect recordings/t1/ with video.webm (ffprobe: VP8, plays),
+  transcript.txt (action log + "— mark: signed in", mm:ss.mmm stamps),
+  recording.json; report.md lands a second or two later (`bx record status`
+  lists it under "distilling" until then; no "spoken"/"speaker" in it). `bx tabs`
+  still shows both tabs and the typed email survives. `bx record stop --mp4`
+  adds video.mp4 (needs ffmpeg with libx264 on PATH). Ring: `bx record start t2
+  --ring 30`, act, `bx record save --last 5`, `bx record stop`. Live suite:
+  `BX_RECORD_LIVE=<p> bun test tests/record.test.ts`. Needs Playwright's
+  ffmpeg (auto-installed on first use).
+- **[cheap] bx.exe parity:** `bun run build:frontdoor`, then
+  `BX_PARITY_PROFILE=<p> bun test tests/argv.test.ts` — 0 diffs between
+  `dist\bx.exe` and `bun src/cli.ts` (human and --json).
 
 Test account (fixture only): demo@taskbox.test / hunter2.
