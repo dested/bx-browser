@@ -75,7 +75,17 @@ interface PageRefs {
   entries: Map<number, RefEntry>;
 }
 
+/** What an action's perform step reports back to runAction. */
+interface Performed {
+  text: string;
+  stableTarget?: string;
+  /** The command carried a password; runAction redacts it from the log. */
+  secret?: boolean;
+}
+
 const SETTLE_MS = 150;
+// synthesize.ts matches this mark to emit a placeholder for redacted fills.
+const REDACTED_MARK = "•••";
 const HAS_SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i;
 const OPAQUE_SCHEME = /^(about|data|file|chrome|blob):/i;
 
@@ -418,12 +428,12 @@ export class Session {
   private async runAction(
     cmd: Cmd | null,
     tab: number | undefined,
-    perform: (page: Page) => Promise<{ text: string; stableTarget?: string }>,
+    perform: (page: Page) => Promise<Performed>,
   ): Promise<ActionResult> {
     const page = await this.pageFor(tab);
     const urlBefore = page.url();
     const mark = markConsole(this.buffers.console);
-    const { text, stableTarget } = await perform(page);
+    const { text, stableTarget, secret } = await perform(page);
     await sleep(SETTLE_MS);
     const navigated = urlBefore !== page.url();
     if (navigated) this.refsFor(page).generation++;
@@ -432,7 +442,11 @@ export class Session {
       navigated,
       consoleErrors: newErrorsSince(this.buffers.console, mark).slice(0, 5),
     };
-    if (cmd) this.appendAction(cmd, text, stableTarget, this.pageId(page));
+    // The log outlives the command: a password must not reach cmdJson.
+    if (cmd) {
+      const logged = secret === true && cmd.cmd === "fill" ? { ...cmd, value: REDACTED_MARK } : cmd;
+      this.appendAction(logged, text, stableTarget, this.pageId(page));
+    }
     return result;
   }
 
@@ -576,8 +590,9 @@ export class Session {
       const { locator, stable } = await this.resolveTarget(page, cmd.target);
       const type = await locator.getAttribute("type").catch(() => null);
       await locator.fill(cmd.value, { timeout: cmd.timeoutMs ?? BUDGET.DEFAULT_TIMEOUT_MS });
-      const shown = type === "password" ? "•••" : cmd.value;
-      return { text: `filled "${stable}" with "${shown}"`, stableTarget: stable };
+      const secret = type === "password";
+      const shown = secret ? REDACTED_MARK : cmd.value;
+      return { text: `filled "${stable}" with "${shown}"`, stableTarget: stable, secret };
     });
   }
 
