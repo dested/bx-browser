@@ -482,6 +482,45 @@ function toMarkdown(root: Element, max: number): { text: string; truncated: bool
   return { text: truncated ? text.slice(0, max) : text, truncated };
 }
 
+/**
+ * In-page (K1): the viewport point to click `el` at, or null when a plain
+ * mouse click there might miss: not visible, disabled, it or an ancestor is
+ * animating, its center is off screen or under another element, or it sits
+ * in a frame (frame coordinates are not page coordinates).
+ */
+function clickPoint(el: Element): { x: number; y: number } | null {
+  if (window !== window.top) return null;
+  // The parent, or the shadow host when n is a shadow root's top element.
+  const up = (n: Element): Element | null => {
+    if (n.parentElement) return n.parentElement;
+    const root = n.getRootNode();
+    return root instanceof ShadowRoot ? root.host : null;
+  };
+  if (!el.isConnected || !el.checkVisibility()) return null;
+  if (("disabled" in el && el.disabled === true) || el.getAttribute("aria-disabled") === "true") return null;
+  // A finished animation no longer moves anything; a running or paused one might.
+  for (let n: Element | null = el; n; n = up(n)) {
+    if (n.getAnimations({ subtree: false }).some((a) => a.playState !== "finished")) return null;
+  }
+  // The first line box: a link that wraps has no ink at its bounding-box center.
+  const box = Array.from(el.getClientRects()).find((r) => r.width > 0 && r.height > 0);
+  if (!box) return null;
+  const x = box.left + box.width / 2;
+  const y = box.top + box.height / 2;
+  if (x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) return null;
+  let hit = document.elementFromPoint(x, y);
+  while (hit?.shadowRoot) {
+    const inner = hit.shadowRoot.elementFromPoint(x, y);
+    if (!inner || inner === hit) break;
+    hit = inner;
+  }
+  // The hit must be el or inside it, crossing shadow boundaries upward.
+  for (let n: Element | null = hit; n; n = up(n)) {
+    if (n === el) return { x, y };
+  }
+  return null;
+}
+
 // wait --idle: how long the network and DOM must both stay quiet.
 const IDLE_MS = 500;
 // Requests that stay open by design never count against idle.
@@ -1242,8 +1281,15 @@ export class Session {
   async click(cmd: CmdOf<"click">): Promise<ActionResult> {
     return this.runAction(cmd, cmd.tab, async (page) => {
       const { locator, stable } = await this.resolveTarget(page, cmd.target, cmd.timeoutMs);
+      const timeout = cmd.timeoutMs ?? BUDGET.DEFAULT_TIMEOUT_MS;
+      // K1: an element that is plainly clickable right now gets a trusted
+      // mouse click at its center, skipping Playwright's two-frame stability
+      // wait (~31 ms). Anything doubtful takes locator.click's full checks.
+      step("check clickable");
+      const point = await locator.evaluate(clickPoint, undefined, { timeout }).catch(() => null);
       step("click");
-      await locator.click({ timeout: cmd.timeoutMs ?? BUDGET.DEFAULT_TIMEOUT_MS });
+      if (point) await page.mouse.click(point.x, point.y);
+      else await locator.click({ timeout });
       return { text: `clicked "${stable}"`, stableTarget: stable };
     }, this.settleCap(cmd.settle));
   }
