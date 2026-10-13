@@ -174,10 +174,38 @@ All optional fields; the full text is in `G:\code\bx\src\protocol.ts` once lande
 
 **Done when.** tsc silent; unit tests pass; `gc` dry run lists real profiles on this machine without deleting anything (paste the top 10); `doctor` output pasted.
 
+## core phase 2: opus-high
+
+**Goal.** Actions tell the caller what changed, waits wait for conditions, fill/select/text/snap stop failing on real-world pages, popups stop stealing the active tab, and the two wave 1 regressions are gone. Then wire in resolve.ts (resolver) and the observe API (infra) as the lead forwards them.
+
+**Read first.** The phase 2 protocol in `G:\code\bx\src\protocol.ts` (landed 7b0db6f), the audit ITEMS A2 A3 C4 C5 C6 S4 O2, Standing answers. The lead put interim testid/label/role handling into resolveTarget at 7b0db6f; it's yours now.
+
+**Order, one commit each:** SP1, SP2, O2, C4, C5, S4, A3, A2, C6, then wiring as it arrives.
+
+**Decisions already made.**
+- SP1 (open speed): `goto` with `waitUntil: "domcontentloaded"`; URL quiet window 150 ms (cap 3000); wait for `load` (cap 3000) only when the URL changed after goto returned. Keep the REDIRECTED_AWAY and scan-retry handling. Report open time on a plain page and the auth-guard fixture 8/8.
+- SP2 (settle on animated pages): the MutationObserver watches childList + characterData, and attributes only via `attributeFilter: ["class","hidden","open","disabled","aria-expanded","aria-hidden","aria-selected","aria-checked","aria-pressed","aria-busy","aria-disabled","aria-modal"]`. Default cap 1000 ms (was 1500). Measure: a page that changes `style.transform` every frame settles in ~50 ms.
+- O2: the active page is tracked by identity (a Page reference, not an index). A new page becomes active only when its opener (`page.opener()`) is the active page and the command that opened it was not pinned to another tab; otherwise it stays in the background. Either way the opening action reports `delta.newTab` (PageInfo).
+- C4: when the resolved element isn't fillable, use its single fillable descendant (`input:not([type=hidden])`, `textarea`, `[contenteditable=""]`, `[contenteditable=true]`), else a `label`'s `control`. None or several → `target_not_found`, message names the count.
+- C5: one in-page step: if the element is a `<select>`, read its options and match value exact, label exact, then label case-insensitive, then set via `selectOption` with the matched value (no timeout-then-retry). If it has `role=combobox`/`listbox` (or a `button[aria-haspopup=listbox]`), click it, then click the visible `role=option` whose accessible name matches exact, then case-insensitive. No match → `target_not_found` with the first 10 option labels in the message.
+- S4: one CDP `Page.captureScreenshot` with `clip: {x, y, width, height, scale}` (session per page, reused); keep today's output width rule; `full` uses `Page.getLayoutMetrics` contentSize and `captureBeyondViewport: true`; `target` crops to the resolved element's box; `jpeg` → `format: "jpeg"`, `quality` default 80, file extension `.jpg`; `stable` captures every 100 ms until two consecutive buffers are byte-equal (cap 3000 ms). SnapResult reports the saved image's true width/height and `format`. No page-side canvas code remains.
+- A3: `wait` takes exactly one of text, selector, ms, idle, gone, url, js (else `bad_request` listing them). `idle`: no in-flight requests of any type and DOM quiet for 500 ms. `gone`: the target resolves to nothing visible. `url`: `page.url()` contains the string. `js`: the expression (through `jsFunctionSource`) is truthy, polled every 100 ms. All use timeoutMs (default BUDGET.DEFAULT_TIMEOUT_MS) and fail with `timeout` naming the condition.
+- A2: `ActionDelta` on every action that settles (absent when settle was skipped). url/title only when changed; dialog = `dialog[open]` or `[aria-modal=true]` visible before vs after; alerts = new text in `[role=alert]`, `[role=status]`, `[aria-live]` (max 3, 200 chars); added/removed = element nodes from a MutationObserver installed before perform; focused = `role "name"` of `document.activeElement` (omit for body); newTab from O2. Budget: at most one extra evaluate before perform, and fold the after-read into settle's final evaluate; overhead on a no-op click ≤ 10 ms. `then`: after settle, attach `els` (full scan), `text` (default target) or `snap` (defaults). `until <text>`: after settle, wait for visible text with timeoutMs; failure → `timeout` `"<text>" never appeared after <verb>` (the action already ran).
+- C6: `text` accepts `target` (wins over selector) through resolveTarget; timeout BUDGET.DEFAULT_TIMEOUT_MS; a miss returns `target_not_found` with near matches; no target → `main`, else `[role=main]`, else body. `md`: an in-page walk emitting `#`..`######` headings, `- ` list items, `[text](href)` links, paragraphs separated by one blank line, other text inline; same TEXT_MAX_CHARS cap and truncated flag.
+- Wiring (as forwarded by the lead): resolver's resolve.ts replaces resolveTarget/els/nearMatches/register; infra's observe API (tab-tagged entries, allTabs, the pin, netBody) gets called from console/net and a new `netBody` dispatch in daemon.ts.
+
+**Owns.** Same as wave 1: `src/daemon/session.ts`, `src/daemon/daemon.ts`, `src/daemon/serialize.ts`, `tests/serialize.test.ts`.
+
+**Done when.** Per item: tsc silent, smoke passes on `core-smoke`, the item's own check pasted (numbers where the item has one). Ready line per item or per pair; don't batch more than two.
+
 ## Standing answers
 
 - (2026-10-12, lead) Batch mode is client-only: `bx -` and `bx do` loop POST /cmd in one process. No `/batch` endpoint. Applies to: all.
 - (2026-10-12, lead) Ref syntax: `@12` canonical; bare digits = `{ref, orText}`. Applies to: resolver, lead.
+- (2026-10-12, Sal) Wave 1 sample approved; phase 2 and beyond go. Applies to: all.
+- (2026-10-12, lead) Phase 2 protocol landed at 7b0db6f, with interim compat edits by the lead in session.ts (resolveTarget: testid/label direct, role → bad_request), debug.ts (targetText) and synthesize.ts (textOf). Owners keep or replace them. Applies to: core, infra, resolver.
+- (2026-10-12, lead) Don't delete your bx profiles (the hook blocks recursive deletes). Leave them; `bx gc` cleans them at the end. Stop your daemons (`bun G:/code/bx/src/cli.ts --profile <p> stop`) when done. Applies to: all.
+- (2026-10-12, lead) Hand-offs that touch another owner's file go to the lead as exact replacement text in a scratch file (path in the message); the lead forwards to the owner. Applies to: resolver, infra, agentkit.
 
 ## Ledger (lead, updated 2026-10-12)
 
