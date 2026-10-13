@@ -3,7 +3,7 @@
 // costs one native process start instead of a Bun one. Runs under Node inside
 // the daemon: node:* only, no Bun APIs.
 
-import type { CmdResult, Cmd } from "../protocol.ts";
+import type { ArgvRequest, ArgvResponse, Cmd, CmdResult } from "../protocol.ts";
 import { toEnvelope, isRecord } from "./envelope.ts";
 import {
   type ArgvEnv,
@@ -11,21 +11,11 @@ import {
   deadlineFor,
   encodeClientTag,
   extractGlobals,
-  LOCAL_VERBS,
   modeNoteText,
   repairMsysArgs,
   wantsHelp,
 } from "./parse.ts";
 import { isServed, reportFailure, reportTiming, runVerb, type VerbIO } from "./verbs.ts";
-
-export interface ArgvRequest {
-  argv: string[];
-  cwd: string;
-  pid?: number;
-  env: ArgvEnv;
-}
-
-export type ArgvResponse = { stdout: string; stderr: string; exit: number } | { fallback: true };
 
 export interface ArgvDeps {
   profile: string;
@@ -72,7 +62,7 @@ export async function serveArgv(body: unknown, deps: ArgvDeps): Promise<ArgvResp
   }
   const g = parsed.globals;
   const [command, ...args] = parsed.rest;
-  if (command === undefined || LOCAL_VERBS.has(command)) return FALLBACK;
+  if (command === undefined) return FALLBACK;
   if (g.profile !== deps.profile || !isServed(command, args)) return FALLBACK;
 
   const startedAt = performance.now();

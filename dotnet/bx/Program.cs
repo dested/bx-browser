@@ -37,6 +37,10 @@ internal static class Program
 
     private const int FallbackCode = -1;
 
+    // Daemon deadlines are the real limit (drive and recordings set their own);
+    // this only guarantees bx.exe can never hang forever on a wedged daemon.
+    private const int SocketCeilingMs = 15 * 60 * 1000;
+
     private static int Main(string[] args)
     {
         var code = TryDaemon(args);
@@ -80,7 +84,12 @@ internal static class Program
         if (run is null) return FallbackCode;
         var (port, token) = run.Value;
 
-        using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+        using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp)
+        {
+            NoDelay = true,
+            SendTimeout = SocketCeilingMs,
+            ReceiveTimeout = SocketCeilingMs,
+        };
         try
         {
             socket.Connect(new IPEndPoint(IPAddress.Loopback, port));

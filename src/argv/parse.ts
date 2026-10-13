@@ -84,6 +84,24 @@ export function extractGlobals(argv: string[]): { globals: Globals; rest: string
   return { globals: { profile, headless, json, deadlineMs, batch: false }, rest };
 }
 
+/** Removes `name` from args; true when it was there. */
+export function takeFlag(args: string[], name: string): boolean {
+  const i = args.indexOf(name);
+  if (i === -1) return false;
+  args.splice(i, 1);
+  return true;
+}
+
+/** Removes `name <value>` from args and returns the value. */
+export function takeOption(args: string[], name: string): string | undefined {
+  const i = args.indexOf(name);
+  if (i === -1) return undefined;
+  const value = args[i + 1];
+  if (value === undefined) throw new CliError(2, `${name} needs a value`);
+  args.splice(i, 2);
+  return value;
+}
+
 /**
  * Verbs only the Bun CLI runs: they read stdin, spawn processes, sweep the
  * disk or manage daemons. dotnet/bx/Program.cs keeps the same list.

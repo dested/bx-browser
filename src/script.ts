@@ -2,7 +2,7 @@
 // each line into shell-style words. Pure functions, unit-tested in
 // tests/script.test.ts.
 
-import { CliError } from "./client.ts";
+import { CliError } from "./argv/errors.ts";
 
 /**
  * Splits a script into command lines: newlines always separate commands, and
