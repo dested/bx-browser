@@ -107,12 +107,36 @@ export interface RelaunchOptions {
   recordVideo?: { dir: string; size: { width: number; height: number } };
 }
 
+// Playwright's wording when the page, context or whole browser is gone.
+const CLOSED_ERROR = /Target page, context or browser has been closed|Browser has been closed/;
+// Chrome's refusal when another process still holds the profile.
+const PROFILE_IN_USE = /Opening in existing browser session|ProcessSingleton|profile (is )?(already )?in use/i;
+
+// R2: orphans.ts — infra replaces this with the real lock sweep in phase 2.
+function clearProfileLocks(_profileDir: string): boolean {
+  return false;
+}
+
+function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "object" && err !== null && "message" in err) return String(err.message);
+  return String(err);
+}
+
 export class Session {
   readonly profile: string;
   readonly headless: boolean;
   private readonly profileDir: string;
   private readonly snapsDir: string;
   private context: BrowserContext | null = null;
+  /** In-flight launch, shared so concurrent commands start one browser. */
+  private launching: Promise<BrowserContext> | null = null;
+  /** The browser closed under us (crash, window closed, process killed). */
+  private dead = false;
+  /** Self-heal relaunches since daemon start; the daemon diffs it per command. */
+  relaunches = 0;
+  /** Tab ids below this belonged to a browser that died. */
+  private lostBelow = 0;
   private activeIndex = 0;
   /**
    * Non-zero while a background `tabNew` is creating its page, so the context's
@@ -145,7 +169,7 @@ export class Session {
   }
 
   get browserRunning(): boolean {
-    return this.context !== null;
+    return this.context !== null && !this.dead;
   }
 
   // -------------------------------------------------------------------------
@@ -154,28 +178,107 @@ export class Session {
 
   private async ensureContext(): Promise<BrowserContext> {
     if (this.context) return this.context;
+    if (!this.launching) {
+      this.launching = (this.dead ? this.relaunchDead() : this.boot()).finally(() => {
+        this.launching = null;
+      });
+    }
+    return this.launching;
+  }
+
+  private async boot(): Promise<BrowserContext> {
+    try {
+      return await this.launch();
+    } catch (err) {
+      throw {
+        code: "browser_launch_failed",
+        message: `${errorMessage(err)} — is another bx daemon using profile "${this.profile}"?`,
+      };
+    }
+  }
+
+  /**
+   * Self-heal: the same path as boot, one blank page, nothing restored. Pages
+   * and refs of the dead browser are gone; its pinned tab ids report as lost.
+   */
+  private async relaunchDead(): Promise<BrowserContext> {
+    const lostBelow = this.nextPageId;
+    let lastError = "";
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const context = await this.launch();
+        if (context.pages().length === 0) await context.newPage();
+        this.dead = false;
+        this.lostBelow = lostBelow;
+        this.activeIndex = 0;
+        this.refs.clear();
+        this.relaunches++;
+        console.log(`[${new Date().toISOString()}] browser relaunched after it closed (${this.relaunches} so far)`);
+        return context;
+      } catch (err) {
+        lastError = errorMessage(err);
+      }
+    }
+    throw { code: "browser_dead", message: `the browser closed and relaunching it failed twice: ${lastError}` };
+  }
+
+  /**
+   * The one launch path: boot, self-heal and recording all come through here.
+   * Seeds the OS-password check first, retries once after clearing stale
+   * profile locks, and wires page tracking plus death detection.
+   */
+  private async launch(extra?: RelaunchOptions): Promise<BrowserContext> {
     const { chromium } = await import("playwright-core");
     // Must precede every launch: a cold profile makes Chrome probe the Windows
     // password with a failed logon, and enough of those lock the account.
     console.log(`[${new Date().toISOString()}] ${seedOsPasswordCheck(this.profileDir)}`);
+    const options = {
+      channel: "chrome",
+      headless: this.headless,
+      viewport: { width: 1280, height: 800 },
+      ...extra,
+    };
     let context: BrowserContext;
     try {
-      context = await chromium.launchPersistentContext(this.profileDir, {
-        channel: "chrome",
-        headless: this.headless,
-        viewport: { width: 1280, height: 800 },
-      });
+      context = await chromium.launchPersistentContext(this.profileDir, options);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      throw {
-        code: "browser_launch_failed",
-        message: `${message} — is another bx daemon using profile "${this.profile}"?`,
-      };
+      if (!PROFILE_IN_USE.test(errorMessage(err)) || !clearProfileLocks(this.profileDir)) throw err;
+      context = await chromium.launchPersistentContext(this.profileDir, options);
     }
     this.context = context;
     for (const page of context.pages()) this.track(page);
     context.on("page", (page) => this.onNewPage(context, page));
+    // Deliberate closes (recording relaunch, shutdown) drop this.context
+    // first, so only an unexpected close gets past the check.
+    context.on("close", () => {
+      if (this.context === context) this.markDead("browser context closed");
+    });
     return context;
+  }
+
+  private markDead(why: string): void {
+    if (this.dead) return;
+    this.dead = true;
+    this.context = null;
+    console.log(`[${new Date().toISOString()}] browser is dead (${why}); the next command relaunches it`);
+  }
+
+  /**
+   * A command failed with Playwright's "closed" wording. That wording also
+   * covers a single closed page, so probe the context before declaring the
+   * browser dead: relaunching would take every other tab down with it.
+   */
+  async noteFailure(err: unknown): Promise<void> {
+    const context = this.context;
+    if (!context || this.dead || !CLOSED_ERROR.test(errorMessage(err))) return;
+    const alive = await Promise.race([
+      context.cookies().then(
+        () => true,
+        () => false,
+      ),
+      sleep(1000).then(() => true),
+    ]);
+    if (!alive && this.context === context) this.markDead("a command found it closed");
   }
 
   private onNewPage(context: BrowserContext, page: Page): void {
@@ -216,7 +319,12 @@ export class Session {
     if (tab === undefined) return this.ensurePage();
     const context = await this.ensureContext();
     const page = context.pages().find((p) => this.pageIds.get(p) === tab);
-    if (!page) throw { code: "no_page", message: `tab ${tab} is closed` };
+    if (!page) {
+      if (tab < this.lostBelow) {
+        throw { code: "no_page", message: `tab ${tab} was lost when the browser closed; open a new one` };
+      }
+      throw { code: "no_page", message: `tab ${tab} is closed` };
+    }
     return page;
   }
 
@@ -973,6 +1081,7 @@ export class Session {
       pages,
       recording: recordingSlug(),
       uptimeMs: Date.now() - this.startedAt,
+      relaunches: this.relaunches,
     };
   }
 
@@ -1078,9 +1187,6 @@ export class Session {
    * page's URL. Video capture can only be switched on when a context is
    * created, and the webm is only flushed when it closes — so starting and
    * stopping a recording both come through here.
-   *
-   * The launch options are repeated rather than shared with ensureContext so
-   * this stays purely additive against concurrent edits to the launch path.
    */
   async relaunch(extra?: RelaunchOptions): Promise<void> {
     const previous = this.context;
@@ -1090,24 +1196,13 @@ export class Session {
     this.context = null;
     if (previous) await previous.close().catch(() => undefined);
 
-    const { chromium } = await import("playwright-core");
-    console.log(`[${new Date().toISOString()}] ${seedOsPasswordCheck(this.profileDir)}`);
     let context: BrowserContext;
     try {
-      context = await chromium.launchPersistentContext(this.profileDir, {
-        channel: "chrome",
-        headless: this.headless,
-        viewport: { width: 1280, height: 800 },
-        ...extra,
-      });
+      context = await this.launch(extra);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      throw { code: "browser_launch_failed", message };
+      throw { code: "browser_launch_failed", message: errorMessage(err) };
     }
-
-    this.context = context;
-    for (const page of context.pages()) this.track(page);
-    context.on("page", (p) => this.onNewPage(context, p));
+    this.dead = false;
 
     const page = context.pages()[0] ?? (await context.newPage());
     if (activeUrl !== undefined && !OPAQUE_SCHEME.test(activeUrl)) {

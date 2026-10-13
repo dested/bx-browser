@@ -41,6 +41,9 @@ const ERROR_CODES: readonly string[] = [
   "not_recording",
   "already_recording",
   "browser_launch_failed",
+  "browser_dead",
+  "deadline",
+  "ambiguous",
   "bad_request",
   "internal",
 ];
@@ -291,11 +294,15 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     const cmd = parsed.data;
     const id = journal.begin(cmd, parseClientTag(req.headers[CLIENT_HEADER]));
     let failure: BxError | null = null;
+    const relaunchesBefore = session.relaunches;
     try {
       const data = await dispatch(cmd);
       log(`${cmd.cmd} ok`);
-      sendJson(res, { ok: true, data } satisfies CmdResult);
+      const envelope: CmdResult = { ok: true, data };
+      if (session.relaunches > relaunchesBefore) envelope.relaunched = true;
+      sendJson(res, envelope);
     } catch (err) {
+      await session.noteFailure(err);
       failure = toBxError(err);
       log(`${cmd.cmd} failed: ${failure.code} ${failure.message}`);
       sendJson(res, fail(failure));
