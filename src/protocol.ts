@@ -448,7 +448,7 @@ export interface StatusResult {
 
 // Action log: appended for every state-changing command (open, click, fill,
 // press, select, mouse, drag, key, wheel, drive, back, reload, tabNew,
-// tabSelect, tabClose) and for every
+// tabSelect, tabClose, js — flows replay js steps, which may set state) and for every
 // PASSING expect (failing expects are exploration noise and are not logged).
 // Used for flow synthesis and as the recording "transcript" — passing expects
 // are what turn a synthesized flow into a regression test instead of a list
@@ -584,6 +584,7 @@ export interface HealthResult { ok: true; profile: string; browserRunning: boole
 // Debug surface, for monitors outside bx (destedtui's `bx` screen). All three
 // need the x-bx-token header and answer with a CmdResult envelope.
 //   GET  /debug               → DebugResult
+//   GET  /debug?light=1       → the same, every pages[].metrics null: no per-page CDP work
 //   POST /debug/gc            → DebugGcResult (daemons are spawned with --expose-gc)
 //   POST /debug/heapsnapshot  → DebugHeapSnapshotResult (stalls the daemon for seconds)
 // Reading /debug never counts as activity: a monitor left open must not keep

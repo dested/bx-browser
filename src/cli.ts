@@ -163,6 +163,14 @@ Setup
 
 Daemon
   profiles                         list profiles and which are running
+  doctor [--fix]                   find orphaned Chromes, stale run files, profile
+                                   locks, leaked recording scratch, big logs;
+                                   --fix cleans what it safely can
+  gc [--older-than 14d] [--keep a,b] [--caches] [--yes]
+                                   list profiles unused for 14+ days with sizes;
+                                   --yes deletes them (never "default" or a
+                                   running one); --caches also empties every
+                                   profile's HTTP/code/GPU caches
   stop [--all]                     shut this profile's daemon down; --all stops
                                    every daemon. Idle daemons also exit on their
                                    own after 15 min (BX_IDLE_MINUTES, 0 = never)
@@ -934,7 +942,7 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
       // Loaded on demand: the runner pulls in zod and the flow synthesizer,
       // which no other verb needs on its startup path.
       const { runFlow } = await import("./flows/runner.ts");
-      const passed = await runFlow(file, { profile: g.profile, record });
+      const passed = await runFlow(file, { profile: g.profile, record, headless: g.headless });
       return passed ? 0 : 1;
     }
 
@@ -1054,6 +1062,36 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
         return 0;
       }
       return send<StatusResult>(g, { cmd: "status" }, renderStatus);
+    }
+
+    case "doctor": {
+      const fix = takeFlag(args, "--fix");
+      // Loaded on demand: process and filesystem sweeps no other verb needs.
+      const { doctor, formatDoctor } = await import("./maintenance.ts");
+      const report = await doctor({ fix });
+      if (g.json) printJson(report);
+      else out(formatDoctor(report));
+      return fix && report.findings.some((f) => f.fixed === false) ? 1 : 0;
+    }
+
+    case "gc": {
+      const caches = takeFlag(args, "--caches");
+      const yes = takeFlag(args, "--yes");
+      const rawOlder = takeOption(args, "--older-than");
+      const rawKeep = takeOption(args, "--keep");
+      let olderThanDays: number | undefined;
+      if (rawOlder !== undefined) {
+        const m = /^(\d+)d?$/.exec(rawOlder);
+        if (m?.[1] === undefined) throw new CliError(2, "--older-than takes days, e.g. 14d");
+        olderThanDays = Number(m[1]);
+      }
+      const keep = rawKeep === undefined ? undefined : rawKeep.split(",").map((k) => k.trim()).filter((k) => k !== "");
+      const { gc, formatGc } = await import("./maintenance.ts");
+      process.stderr.write("scanning profiles (sizes every one; a few seconds)…\n");
+      const report = await gc({ olderThanDays, caches, yes, keep });
+      if (g.json) printJson(report);
+      else out(formatGc(report, { limit: 40 }));
+      return 0;
     }
 
     case "profiles": {
