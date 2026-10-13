@@ -35,8 +35,9 @@ bx agent "log in as demo@acme.test and verify the invoice list loads" --save inv
   (long multi-page journeys, gnarly canvas work) — ~2× Sonnet cost. Don't pass
   it by default; add it when a Sonnet attempt already failed on a task that
   genuinely needs the extra reasoning. `--model opus` runs Opus directly.
-- Typical real-app DOM task: 10–40 turns, 15–75s, $0.02–0.06. Measured 7/7
-  correct on a production app. Canvas tasks run longer — raise the budget with
+- Measured (bench suite, 2026-10-12): Haiku 5.5 passed 12/12, median 7.5
+  turns (p90 9), ~15s, ~$0.002 per task at list price; Sonnet 5.5 also 12/12 at
+  ~$0.04. Canvas and drive tasks run ~140s — raise the budget with
   `--max-turns 60` for multi-step game work.
 - Every run writes a full turn-by-turn transcript to `~/.bx/agent-runs/` (path
   in the trailer); `--verbose` streams it live to stderr; a heartbeat line

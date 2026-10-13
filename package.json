@@ -26,7 +26,7 @@
   },
   "trustedDependencies": ["video-to-prompt"],
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.221",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.296",
     "playwright-core": "^1.62.1",
     "video-to-prompt": "github:dested/video-to-prompt",
     "zod": "^4.4.3"
