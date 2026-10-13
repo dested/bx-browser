@@ -148,6 +148,56 @@ function domQuiet(o: { quietMs: number; capMs: number }): Promise<{ quiet: boole
   });
 }
 
+type SelectKind =
+  | { kind: "native"; options: { value: string; label: string }[] }
+  | { kind: "listbox" }
+  | { kind: "other" };
+
+/** In-page: what `select` is dealing with, and a native select's options. */
+function selectKind(el: Element): SelectKind {
+  if (el instanceof HTMLSelectElement) {
+    return {
+      kind: "native",
+      options: Array.from(el.options, (o) => ({ value: o.value, label: (o.label || o.text).trim() })),
+    };
+  }
+  const role = el.getAttribute("role");
+  if (role === "combobox" || role === "listbox") return { kind: "listbox" };
+  if (el.tagName === "BUTTON" && el.getAttribute("aria-haspopup") === "listbox") return { kind: "listbox" };
+  return { kind: "other" };
+}
+
+/**
+ * In-page: marks the visible role=option named `want` (exact, then
+ * case-insensitive) with a data-bx-option nonce; also returns the visible
+ * option labels for the miss message.
+ */
+function markOption(want: string): { marker: string | null; labels: string[] } {
+  const visible = Array.from(document.querySelectorAll('[role="option"]')).filter((el) => el.checkVisibility());
+  const named = visible.map((el) => ({
+    el,
+    name: (el.getAttribute("aria-label") || el.textContent || "").trim().replace(/\s+/g, " "),
+  }));
+  const lower = want.trim().toLowerCase();
+  const hit = named.find((o) => o.name === want) ?? named.find((o) => o.name.toLowerCase() === lower);
+  const labels = named.map((o) => o.name);
+  if (!hit) return { marker: null, labels };
+  const marker = String(Date.now()) + String(Math.random()).slice(2, 8);
+  hit.el.setAttribute("data-bx-option", marker);
+  return { marker, labels };
+}
+
+function noOption(want: string, stable: string, labels: string[]): { code: "target_not_found"; message: string } {
+  const listed = labels.slice(0, 10).map((l) => `"${l}"`).join(", ");
+  const more = labels.length > 10 ? ` and ${labels.length - 10} more` : "";
+  return {
+    code: "target_not_found",
+    message: labels.length
+      ? `no option "${want}" in "${stable}"; options: ${listed}${more}`
+      : `no option "${want}" in "${stable}"; it shows no options`,
+  };
+}
+
 /** fetch/XHR requests a page starts while an action runs. */
 interface RequestWatch {
   inFlight(): number;
@@ -933,14 +983,52 @@ export class Session {
     return this.runAction(cmd, cmd.tab, async (page) => {
       const { locator, stable } = await this.resolveTarget(page, cmd.target);
       const timeout = cmd.timeoutMs ?? BUDGET.DEFAULT_TIMEOUT_MS;
-      try {
+      step("read options");
+      const kind = await locator.evaluate(selectKind, undefined, { timeout });
+      if (kind.kind === "native") {
+        const want = cmd.value;
+        const match =
+          kind.options.find((o) => o.value === want) ??
+          kind.options.find((o) => o.label === want) ??
+          kind.options.find((o) => o.label.toLowerCase() === want.trim().toLowerCase());
+        if (!match) throw noOption(want, stable, kind.options.map((o) => o.label));
         step("select");
-        await locator.selectOption({ value: cmd.value }, { timeout });
-      } catch {
-        await locator.selectOption({ label: cmd.value }, { timeout });
+        await locator.selectOption({ value: match.value }, { timeout });
+      } else if (kind.kind === "listbox") {
+        step("open the list");
+        await locator.click({ timeout });
+        await this.pickOption(page, cmd.value, stable, timeout);
+      } else {
+        throw { code: "target_not_found", message: `"${stable}" is not a select, combobox or listbox` };
       }
       return { text: `selected "${cmd.value}" in "${stable}"`, stableTarget: stable };
     }, this.settleCap(cmd.settle));
+  }
+
+  /**
+   * Custom dropdowns (C5): after opening, click the visible role=option whose
+   * name matches exactly, else case-insensitively. Options render async, so
+   * the list is polled until one matches or the timeout runs out.
+   */
+  private async pickOption(page: Page, want: string, stable: string, timeout: number): Promise<void> {
+    step("pick the option");
+    const deadline = Date.now() + timeout;
+    let seen: string[] = [];
+    for (;;) {
+      const found = await page.evaluate(markOption, want);
+      seen = found.labels;
+      if (found.marker !== null) {
+        const option = page.locator(`[data-bx-option="${found.marker}"]`);
+        try {
+          await option.click({ timeout: Math.max(1000, deadline - Date.now()) });
+        } finally {
+          await option.evaluate((el) => el.removeAttribute("data-bx-option")).catch(() => undefined);
+        }
+        return;
+      }
+      if (Date.now() >= deadline) throw noOption(want, stable, seen);
+      await sleep(100);
+    }
   }
 
   async press(cmd: CmdOf<"press">): Promise<ActionResult> {
