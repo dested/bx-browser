@@ -2056,6 +2056,19 @@ export class Session {
   async wheel(cmd: CmdOf<"wheel">): Promise<ActionResult> {
     return this.runAction(cmd, cmd.tab, async (page) => {
       let stable: string | undefined;
+      if (cmd.in && cmd.x === undefined && cmd.y === undefined) {
+        // G3: `wheel --in <target>` alone scrolls that element into view.
+        const resolved = await this.resolveTarget(page, cmd.in);
+        step("scroll into view");
+        await resolved.locator.scrollIntoViewIfNeeded({ timeout: BUDGET.DEFAULT_TIMEOUT_MS });
+        const done = `scrolled "${resolved.stable}" into view`;
+        if (cmd.deltaY === 0) return { text: done, stableTarget: resolved.stable };
+        // Then wheel over it, so a scrollable element scrolls rather than the page.
+        const box = await resolved.locator.boundingBox();
+        if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+        await page.mouse.wheel(0, cmd.deltaY);
+        return { text: `${done}, then wheel ${cmd.deltaY}`, stableTarget: resolved.stable };
+      }
       if (cmd.x !== undefined || cmd.y !== undefined) {
         const origin = await this.resolveOrigin(page, cmd.in);
         await page.mouse.move(origin.x + (cmd.x ?? 0), origin.y + (cmd.y ?? 0));
