@@ -296,16 +296,18 @@ Board: down · Last pushed: 2e42e9d (gate 94/94) · bx-live refreshed from 2e42e
 | Agent | Model | Owns | Item now | Last sha / artifact | Status |
 | --- | --- | --- | --- | --- | --- |
 | scout | opus-xhigh | research report | done: plans/2026-10-12-speed-research.md | ea409d0 | stopped |
-| core | opus-high | session.ts, daemon.ts, serialize.ts | waiting on K3/K4 hand-offs | K1 a308c59 (click 33→4 ms) K2 30817c4 (cold 789→684 ms) (passed) | idle |
+| core | opus-high | session.ts, daemon.ts, serialize.ts | K5 js SyntaxError → bad_request; then K4 | K1 a308c59 K2 30817c4 K3 d0bea81 (passed) | running |
 | resolver | opus-high | resolve.ts, distill.ts | all done | de96220 (passed) | stopped |
 | agentkit | opus-high | src/agent/**, src/bench/** | G2 full run on 2e42e9d (cap $3) → G6 numbers | 548a1ab | running |
 | infra | opus-high | observe, debug, orphans, maintenance(→lead), flows | all done | e7338f8 (passed) | stopped |
-| recorder | opus-high | record.ts, screencast.ts, harness/**, record tests | sample: screencast start/stop | — | spawning |
-| frontdoor | opus-high | dotnet/**, cli.ts, client.ts, src/argv/**, script.ts, argv tests | sample: bx.exe `js 1` via /argv | — | spawning |
+| recorder | opus-high | record.ts, screencast.ts, harness/**, record tests | ring, marks, follow, mp4, bg distill, run --record, K4 hand-off | sample 5b40091 (passed; protocol 221ed16) | running |
+| frontdoor | opus-high | dotnet/**, cli.ts, client.ts, src/argv/**, script.ts, argv tests | full refactor + parity; owes hidden-spawn windows=0 proof | F0 bf29755, sample c1d3be6, d428a22 (passed) | running |
 | lead | — | protocol, constants, maintenance, SKILL.md, kit | CACHE_DIRS BrowserMetrics; forward hand-offs | ea409d0 | — |
 
 Live tool: global bx → G:/code/bx-live (2e42e9d). Relink to G:/code/bx at the end.
 Background jobs: agentkit bench (its own).
+Incident 22:21–22:27: visible windows from frontdoor (dotnet publish build servers / link step, bx.exe fallback) and recorder (pwsh CPU probe without windowsHide). Fixed; Standing answer added.
+Smoke flake: Chrome intermittently drops trusted input machine-wide (core repro scratchpad\core\pw-direct3.mjs); re-run smoke once before believing click failures.
 Waiting on Sal: nothing. Later: bx.exe on PATH (ask when frontdoor's done).
 Unpushed: 548a1ab ea409d0 b32fd83 17a79cb a308c59 30817c4 + this.
 Profiles to delete at wrap-up (add): recorder-dev, frontdoor-dev, core-k2a1..3, core-k2b1..4, core-k2c.
