@@ -646,11 +646,6 @@ export interface SessionOptions {
   headless: boolean;
 }
 
-/** Context options that only recording varies; see `Session.relaunch`. */
-export interface RelaunchOptions {
-  recordVideo?: { dir: string; size: { width: number; height: number } };
-}
-
 /**
  * What the command in flight is doing, per request (R3). The daemon names the
  * last label when a command outruns its deadline.
@@ -693,6 +688,8 @@ export class Session {
    * opened it (see onNewPage); null means "fall back to the newest page".
    */
   private active: Page | null = null;
+  /** Told after every change of `active`; record.ts --follow re-targets on it. */
+  private readonly activeListeners = new Set<() => void>();
   private readonly openers = new WeakMap<Page, Page>();
   /** onNewPage's opener check per page; an action awaits it before reporting newTab. */
   private readonly activation = new WeakMap<Page, Promise<void>>();
@@ -735,8 +732,38 @@ export class Session {
     const pages = this.context?.pages() ?? [];
     if (this.active && !this.active.isClosed() && pages.includes(this.active)) return this.active;
     const fallback = pages[pages.length - 1];
-    this.active = fallback ?? null;
+    this.setActive(fallback ?? null);
     return fallback;
+  }
+
+  /** Every write of the active slot goes through here so listeners hear it. */
+  private setActive(page: Page | null): void {
+    if (this.active === page) return;
+    this.active = page;
+    const failed = (err: unknown): void => {
+      console.log(`[${new Date().toISOString()}] active-tab listener failed: ${errorMessage(err)}`);
+    };
+    for (const listener of this.activeListeners) {
+      try {
+        // An async listener's rejection would otherwise be unhandled and end the daemon.
+        const out: unknown = listener();
+        if (out instanceof Promise) out.catch(failed);
+      } catch (err) {
+        failed(err);
+      }
+    }
+  }
+
+  /**
+   * Calls `listener` after the active tab changes (tab select, a popup taking
+   * over, a close falling back). Read `activeTabId` inside it. Returns the
+   * unsubscribe.
+   */
+  onActiveChange(listener: () => void): () => void {
+    this.activeListeners.add(listener);
+    return () => {
+      this.activeListeners.delete(listener);
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -787,7 +814,7 @@ export class Session {
         if (context.pages().length === 0) await context.newPage();
         this.dead = false;
         this.lostBelow = lostBelow;
-        this.active = null;
+        this.setActive(null);
         this.relaunches++;
         console.log(`[${new Date().toISOString()}] browser relaunched after it closed (${this.relaunches} so far)`);
         return context;
@@ -799,11 +826,11 @@ export class Session {
   }
 
   /**
-   * The one launch path: boot, self-heal and recording all come through here.
+   * The one launch path: boot and self-heal both come through here.
    * Seeds the OS-password check first, retries once after clearing stale
    * profile locks, and wires page tracking plus death detection.
    */
-  private async launch(extra?: RelaunchOptions): Promise<BrowserContext> {
+  private async launch(): Promise<BrowserContext> {
     const { chromium } = await import("playwright-core");
     // Must precede every launch: a cold profile makes Chrome probe the Windows
     // password with a failed logon, and enough of those lock the account.
@@ -814,7 +841,6 @@ export class Session {
       viewport: { width: 1280, height: 800 },
       // 64 MB: an uncapped disk cache is most of a profile's ~84 MB.
       args: ["--disk-cache-size=67108864"],
-      ...extra,
     };
     let context: BrowserContext;
     try {
@@ -830,7 +856,7 @@ export class Session {
     this.context = context;
     for (const page of context.pages()) this.track(page);
     context.on("page", (page) => this.onNewPage(page));
-    // Deliberate closes (recording relaunch, shutdown) drop this.context
+    // Deliberate closes (shutdown) drop this.context
     // first, so only an unexpected close gets past the check.
     context.on("close", () => {
       if (this.context === context) this.markDead("browser context closed");
@@ -877,7 +903,7 @@ export class Session {
       (opener) => {
         if (!opener) return;
         this.openers.set(page, opener);
-        if (opener === activeNow && this.active === activeNow && !page.isClosed()) this.active = page;
+        if (opener === activeNow && this.active === activeNow && !page.isClosed()) this.setActive(page);
       },
       () => undefined,
     );
@@ -908,7 +934,7 @@ export class Session {
       // A closed popup hands the active slot back to the page that opened it.
       if (this.active === page) {
         const opener = this.openers.get(page);
-        this.active = opener && !opener.isClosed() ? opener : null;
+        this.setActive(opener && !opener.isClosed() ? opener : null);
       }
     });
   }
@@ -2041,12 +2067,12 @@ export class Session {
     // newPage() pages have no opener, so onNewPage never activates them.
     const page = await context.newPage();
     if (!background) {
-      this.active = page;
+      this.setActive(page);
       return page;
     }
     // Chrome foregrounds a freshly opened tab regardless of what we track.
     if (stay && !stay.isClosed()) await stay.bringToFront().catch(() => undefined);
-    this.active = stay ?? page;
+    this.setActive(stay ?? page);
     return page;
   }
 
@@ -2074,7 +2100,7 @@ export class Session {
     const context = await this.ensureContext();
     const page = context.pages()[cmd.index];
     if (!page) throw { code: "bad_request", message: `no tab at index ${cmd.index}` };
-    this.active = page;
+    this.setActive(page);
     await page.bringToFront().catch(() => undefined);
     this.appendAction(cmd, `selected tab ${cmd.index}`, undefined, this.pageId(page));
     return this.tabs();
@@ -2096,7 +2122,7 @@ export class Session {
         closed++;
       }
       if (context.pages().length === 0) await context.newPage();
-      this.active = keep ?? context.pages()[0] ?? null;
+      this.setActive(keep ?? context.pages()[0] ?? null);
       const what =
         cmd.scope === "others"
           ? `closed ${closed} other tab${closed === 1 ? "" : "s"}`
@@ -2218,42 +2244,8 @@ export class Session {
     return this.buffers.t0;
   }
 
-  /**
-   * Read-only view of a page's stable tab id — recording pairs each context
-   * page's video with its tab so it can select the tab that was actually
-   * driven (by action count) rather than the largest webm.
-   */
+  /** Read-only view of a page's stable tab id (recording finds its tab by it). */
   tabIdOf(page: Page): number {
     return this.pageId(page);
-  }
-
-  /**
-   * Reopens the browser with different context options, restoring the active
-   * page's URL. Video capture can only be switched on when a context is
-   * created, and the webm is only flushed when it closes — so starting and
-   * stopping a recording both come through here.
-   */
-  async relaunch(extra?: RelaunchOptions): Promise<void> {
-    const previous = this.context;
-    const activeUrl = previous ? this.activePage()?.url() : undefined;
-
-    this.context = null;
-    if (previous) await previous.close().catch(() => undefined);
-
-    let context: BrowserContext;
-    try {
-      context = await this.launch(extra);
-    } catch (err) {
-      throw { code: "browser_launch_failed", message: errorMessage(err) };
-    }
-    this.dead = false;
-
-    const page = context.pages()[0] ?? (await context.newPage());
-    if (activeUrl !== undefined && !OPAQUE_SCHEME.test(activeUrl)) {
-      await page
-        .goto(activeUrl, { waitUntil: "domcontentloaded", timeout: 15000 })
-        .catch(() => undefined);
-    }
-    this.active = page;
   }
 }
