@@ -19,6 +19,8 @@ import {
   BX_DIR_NAME,
   CLIENT_HEADER,
   CmdSchema,
+  DEADLINE_HEADER,
+  DEFAULT_DEADLINE_MS,
   LOGS_DIR,
   PROFILES_DIR,
   RUN_DIR,
@@ -29,7 +31,7 @@ import {
   type HealthResult,
   type RunFile,
 } from "../protocol.ts";
-import { Session } from "./session.ts";
+import { Session, steps } from "./session.ts";
 import { harnessRoutes, recordStart, recordStop, recordingSlug } from "./record.ts";
 import { collectDebug, heapSnapshot, Journal, parseClientTag, runGc } from "./debug.ts";
 
@@ -115,6 +117,42 @@ function toBxError(err: unknown): BxError {
 
 function fail(error: BxError): CmdResult<never> {
   return { ok: false, error };
+}
+
+const DEADLINE_MIN_MS = 1000;
+const DEADLINE_MAX_MS = 600_000;
+
+/**
+ * How long a command may run (R3), or null for none. The header (default 10 s,
+ * clamped) is raised to cover a command's own timeout so an explicit
+ * `--timeout 20000` wait isn't cut off at 10 s; drive gets its own budget and
+ * recordings are exempt (a relaunch plus ffmpeg can take a while).
+ */
+function deadlineFor(cmd: Cmd, header: string | string[] | undefined): number | null {
+  if (cmd.cmd === "recordStart" || cmd.cmd === "recordStop") return null;
+  if (cmd.cmd === "drive") return (cmd.timeoutMs ?? 15000) + 5000;
+  const raw = Number(Array.isArray(header) ? header[0] : header);
+  const asked = Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_DEADLINE_MS;
+  let ms = Math.min(DEADLINE_MAX_MS, Math.max(DEADLINE_MIN_MS, asked));
+  if ("timeoutMs" in cmd && cmd.timeoutMs !== undefined) ms = Math.max(ms, cmd.timeoutMs + 5000);
+  if (cmd.cmd === "wait" && cmd.ms !== undefined) ms = Math.max(ms, Math.min(cmd.ms, 30000) + 5000);
+  return Math.min(DEADLINE_MAX_MS, ms);
+}
+
+/**
+ * Answers `deadline` when `work` outruns `ms`. The work itself is abandoned,
+ * not cancelled: Playwright has no way to interrupt a hung evaluate, so its
+ * eventual result (or error) is discarded.
+ */
+function withDeadline<T>(work: Promise<T>, ms: number, tracker: { label: string }): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject({ code: "deadline", message: `deadline ${ms} ms exceeded during ${tracker.label}` });
+    }, ms);
+  });
+  work.catch(() => undefined);
+  return Promise.race([work, expired]).finally(() => clearTimeout(timer));
 }
 
 const { profile, headless } = parseArgs(process.argv.slice(2));
@@ -296,7 +334,10 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     let failure: BxError | null = null;
     const relaunchesBefore = session.relaunches;
     try {
-      const data = await dispatch(cmd);
+      const tracker = { label: cmd.cmd };
+      const work = steps.run(tracker, () => dispatch(cmd));
+      const limit = deadlineFor(cmd, req.headers[DEADLINE_HEADER]);
+      const data = limit === null ? await work : await withDeadline(work, limit, tracker);
       log(`${cmd.cmd} ok`);
       const envelope: CmdResult = { ok: true, data };
       if (session.relaunches > relaunchesBefore) envelope.relaunched = true;

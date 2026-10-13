@@ -1,6 +1,7 @@
 // The browser session: one persistent Chrome context per profile, lazily
 // launched, plus the ref registry that makes `bx click 3` work.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { mkdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -207,6 +208,17 @@ export interface RelaunchOptions {
   recordVideo?: { dir: string; size: { width: number; height: number } };
 }
 
+/**
+ * What the command in flight is doing, per request (R3). The daemon names the
+ * last label when a command outruns its deadline.
+ */
+export const steps = new AsyncLocalStorage<{ label: string }>();
+
+function step(label: string): void {
+  const current = steps.getStore();
+  if (current) current.label = label;
+}
+
 // Playwright's wording when the page, context or whole browser is gone.
 const CLOSED_ERROR = /Target page, context or browser has been closed|Browser has been closed/;
 // Chrome's refusal when another process still holds the profile.
@@ -280,6 +292,7 @@ export class Session {
 
   private async ensureContext(): Promise<BrowserContext> {
     if (this.context) return this.context;
+    step(this.dead ? "relaunch browser" : "launch browser");
     if (!this.launching) {
       this.launching = (this.dead ? this.relaunchDead() : this.boot()).finally(() => {
         this.launching = null;
@@ -575,6 +588,7 @@ export class Session {
    * spent. A navigation mid-wait restarts the DOM check on the new document.
    */
   private async settle(page: Page, capMs: number, requests: RequestWatch): Promise<number> {
+    step("settle");
     const started = Date.now();
     const left = (): number => capMs - (Date.now() - started);
     while (left() > 0) {
@@ -619,6 +633,7 @@ export class Session {
   }
 
   private async resolveTarget(page: Page, target: Target): Promise<Resolved> {
+    step("resolve target");
     if ("ref" in target) {
       const refs = this.refsFor(page);
       const entry = refs.entries.get(target.ref);
@@ -717,6 +732,7 @@ export class Session {
     const page = await this.pageFor(cmd.tab);
     const urlBefore = page.url();
     try {
+      step("navigate");
       await page.goto(url, { waitUntil: "load", timeout: 15000 });
     } catch (err) {
       // A page that redirects itself before load (auth guards) makes goto
@@ -724,14 +740,18 @@ export class Session {
       // Only a page that went nowhere is a real failure.
       if (!REDIRECTED_AWAY.test(errorMessage(err)) || page.url() === urlBefore) throw err;
     }
+    step("wait for redirects");
     await this.urlSettled(page);
     let scan: DistillResult;
     try {
+      step("scan");
       scan = await this.scan(page);
     } catch (err) {
       // It redirected again after the quiet window; scan the page it landed on.
       if (!CONTEXT_GONE.test(errorMessage(err))) throw err;
+      step("wait for redirects");
       await this.urlSettled(page);
+      step("scan");
       scan = await this.scan(page);
     }
     this.appendAction({ cmd: "open", url }, `opened ${url}`, url, this.pageId(page));
@@ -765,6 +785,7 @@ export class Session {
 
   async els(cmd: CmdOf<"els">): Promise<ElsResult> {
     const page = await this.pageFor(cmd.tab);
+    step("scan");
     const scan = await this.scan(page);
     return {
       generation: this.refsFor(page).generation,
@@ -775,6 +796,7 @@ export class Session {
   async click(cmd: CmdOf<"click">): Promise<ActionResult> {
     return this.runAction(cmd, cmd.tab, async (page) => {
       const { locator, stable } = await this.resolveTarget(page, cmd.target);
+      step("click");
       await locator.click({ timeout: cmd.timeoutMs ?? BUDGET.DEFAULT_TIMEOUT_MS });
       return { text: `clicked "${stable}"`, stableTarget: stable };
     }, this.settleCap(cmd.settle));
@@ -784,6 +806,7 @@ export class Session {
     return this.runAction(cmd, cmd.tab, async (page) => {
       const { locator, stable } = await this.resolveTarget(page, cmd.target);
       const type = await locator.getAttribute("type").catch(() => null);
+      step("fill");
       await locator.fill(cmd.value, { timeout: cmd.timeoutMs ?? BUDGET.DEFAULT_TIMEOUT_MS });
       const secret = type === "password";
       const shown = secret ? REDACTED_MARK : cmd.value;
@@ -796,6 +819,7 @@ export class Session {
       const { locator, stable } = await this.resolveTarget(page, cmd.target);
       const timeout = cmd.timeoutMs ?? BUDGET.DEFAULT_TIMEOUT_MS;
       try {
+        step("select");
         await locator.selectOption({ value: cmd.value }, { timeout });
       } catch {
         await locator.selectOption({ label: cmd.value }, { timeout });
@@ -806,6 +830,7 @@ export class Session {
 
   async press(cmd: CmdOf<"press">): Promise<ActionResult> {
     return this.runAction(cmd, cmd.tab, async (page) => {
+      step("press");
       await page.keyboard.press(cmd.key);
       return { text: `pressed ${cmd.key}` };
     }, this.settleCap(cmd.settle, MODIFIER_KEYS.has(cmd.key)));
@@ -832,6 +857,7 @@ export class Session {
 
   async expect(cmd: CmdOf<"expect">): Promise<ExpectResult> {
     const page = await this.pageFor(cmd.tab);
+    step("expect");
     const result = await this.evaluateExpect(page, cmd);
     // Passing assertions are what make a synthesized flow a regression test;
     // failing ones are exploration noise.
@@ -886,6 +912,7 @@ export class Session {
 
   async snap(cmd: CmdOf<"snap">): Promise<SnapResult> {
     const page = await this.pageFor(cmd.tab);
+    step("screenshot");
     const original = await page.screenshot({ fullPage: cmd.full === true });
     const viewport = page.viewportSize();
 
@@ -931,7 +958,8 @@ export class Session {
   async text(cmd: CmdOf<"text">): Promise<TextResult> {
     const page = await this.pageFor(cmd.tab);
     const locator = cmd.selector ? page.locator(cmd.selector).first() : page.locator("body");
-    const raw = (await locator.innerText()).replace(/\n{3,}/g, "\n\n");
+    step("read text");
+    const raw = (await locator.innerText({ timeout: BUDGET.DEFAULT_TIMEOUT_MS })).replace(/\n{3,}/g, "\n\n");
     const truncated = raw.length > BUDGET.TEXT_MAX_CHARS;
     return { text: truncated ? raw.slice(0, BUDGET.TEXT_MAX_CHARS) : raw, truncated };
   }
@@ -949,11 +977,13 @@ export class Session {
     const source = `(async () => (${cmd.expression}))()`;
     let value: unknown;
     try {
+      step("evaluate");
       value = await page.evaluate<unknown>(source);
     } catch (err) {
       // A redirect replaced the document under us; run once on the new one.
       if (!CONTEXT_GONE.test(errorMessage(err))) throw err;
       await page.waitForLoadState("load", { timeout: 5000 }).catch(() => undefined);
+      step("evaluate on the new document");
       value = await page.evaluate<unknown>(source);
     }
     const serialized = value === undefined ? "undefined" : (JSON.stringify(value) ?? "undefined");
@@ -972,6 +1002,7 @@ export class Session {
   async drive(cmd: CmdOf<"drive">): Promise<DriveResult> {
     const page = await this.pageFor(cmd.tab);
     try {
+      step("drive install");
       await page.evaluate(`(async () => { ${cmd.install} })()`);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -986,6 +1017,7 @@ export class Session {
     // A poll that throws leaves its error message as the value: a predicate
     // that never evaluates is the caller's most useful diagnostic.
     let finalValue = "undefined";
+    step("drive poll");
     for (;;) {
       let value: unknown;
       let threw = false;
