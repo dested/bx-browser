@@ -145,3 +145,42 @@ test("gc is a dry run by default and deletes only stale, unprotected profiles wi
   // Cookies and logins live outside the cache folders and survive.
   expect(fs.existsSync(path.join(pinned, "Default", "Preferences"))).toBe(true);
 });
+
+test("gc and doctor --fix never enter or delete through a symlink or junction", async () => {
+  const bx = tmpBx();
+  // Everything a link points at lives outside the bx folder, but inside this
+  // test's temp root, so even a buggy delete stays contained.
+  const outside = path.join(bx, "..", `${path.basename(bx)}-outside`);
+  roots.push(outside);
+  const victimProfile = profile(outside, "victim", NOW - 90 * DAY);
+  write(path.join(outside, "cache-target", "data_1"), 700);
+  write(path.join(outside, "video-target", "page.webm"), 900);
+
+  fs.symlinkSync(victimProfile, path.join(bx, "profiles", "linked"), "junction");
+  const kept = profile(bx, "kept", NOW - 60 * DAY);
+  fs.mkdirSync(path.join(kept, "Default"), { recursive: true });
+  fs.symlinkSync(path.join(outside, "cache-target"), path.join(kept, "Default", "Cache"), "junction");
+  write(path.join(kept, "GrShaderCache", "x"), 300);
+  const tmpLink = path.join(bx, "tmp-video", "rec-linked");
+  fs.symlinkSync(path.join(outside, "video-target"), tmpLink, "junction");
+
+  const dry = await gc({ bxDir: bx, now: NOW, keep: ["kept"], caches: true });
+  const linked = dry.profiles.find((p) => p.name === "linked");
+  expect(linked).toMatchObject({ action: "skip", why: "link", bytes: 0 });
+  expect(dry.profiles.find((p) => p.name === "kept")?.cacheBytes).toBe(300); // the junctioned Cache is not counted
+  expect(formatGc(dry, { now: NOW })).toContain("skipped: link  linked");
+
+  await gc({ bxDir: bx, now: NOW, keep: ["kept"], caches: true, yes: true });
+  expect(fs.existsSync(path.join(victimProfile, "Default", "Preferences"))).toBe(true);
+  expect(fs.existsSync(path.join(outside, "cache-target", "data_1"))).toBe(true);
+  expect(fs.existsSync(path.join(kept, "GrShaderCache"))).toBe(false); // the real cache folder was cleared
+
+  const report = await doctor({ bxDir: bx, now: NOW, fix: true });
+  const links = report.findings.filter((f) => f.kind === "link");
+  expect(links.map((f) => f.detail).sort()).toEqual(
+    [`skipped: link ${path.join(bx, "profiles", "linked")}`, `skipped: link ${tmpLink}`].sort(),
+  );
+  expect(links.every((f) => !f.fixable && f.fixed === undefined)).toBe(true);
+  expect(fs.existsSync(path.join(outside, "video-target", "page.webm"))).toBe(true);
+  expect(fs.lstatSync(tmpLink).isSymbolicLink()).toBe(true);
+});

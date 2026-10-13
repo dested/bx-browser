@@ -8,7 +8,7 @@
 // Bun side (the CLI); the process helpers live in daemon/orphans.ts so the
 // daemon's own launch retry uses the same code.
 
-import { readFile, readdir, rename, rm, stat } from "node:fs/promises";
+import { lstat, readFile, readdir, rename, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { BX_DIR_NAME, LOGS_DIR, PROFILES_DIR, RUN_DIR } from "./constants.ts";
@@ -114,11 +114,52 @@ function bxProfileOf(proc: ChromeProcess, profilesKey: string): string | null {
 }
 
 // ---------------------------------------------------------------------------
+// Links (R2b). A symlink or junction under ~/.bx can point anywhere (a repo,
+// another drive), so nothing here follows, sizes or deletes through one: it is
+// reported as `skipped: link` instead. Node and Bun report a Windows junction
+// (a directory reparse point) as a symbolic link from both lstat and Dirent,
+// so isSymbolicLink() covers symlinks and junctions alike.
+// ---------------------------------------------------------------------------
+
+export async function isLink(p: string): Promise<boolean> {
+  try {
+    return (await lstat(p)).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+/** True when `rel` (forward slashes) under `root` is a link or passes through one. */
+export async function crossesLink(root: string, rel: string): Promise<boolean> {
+  let at = root;
+  for (const part of rel.split("/")) {
+    at = path.join(at, part);
+    if (await isLink(at)) return true;
+  }
+  return false;
+}
+
+/** A directory's subdirectories, with links split out (never treated as directories). */
+async function listDirs(dir: string): Promise<{ dirs: string[]; links: string[] }> {
+  const out = { dirs: [] as string[], links: [] as string[] };
+  try {
+    for (const e of await readdir(dir, { withFileTypes: true })) {
+      if (e.isSymbolicLink()) out.links.push(e.name);
+      else if (e.isDirectory()) out.dirs.push(e.name);
+    }
+  } catch {
+    // missing: nothing to list
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Sizes
 // ---------------------------------------------------------------------------
 
-/** Bytes under a directory; unreadable entries count as zero. */
-export async function dirBytes(dir: string): Promise<number> {
+/** Bytes under a directory; unreadable entries count as zero. Links count as zero and are never entered. */
+export async function dirBytes(dir: string, checkRoot = true): Promise<number> {
+  if (checkRoot && (await isLink(dir))) return 0;
   let entries;
   try {
     entries = await readdir(dir, { withFileTypes: true });
@@ -128,7 +169,7 @@ export async function dirBytes(dir: string): Promise<number> {
   const sizes = await Promise.all(
     entries.map(async (e): Promise<number> => {
       const full = path.join(dir, e.name);
-      if (e.isDirectory()) return dirBytes(full);
+      if (e.isDirectory()) return dirBytes(full, false);
       if (!e.isFile()) return 0;
       try {
         return (await stat(full)).size;
@@ -161,7 +202,14 @@ export function formatBytes(n: number): string {
 // doctor
 // ---------------------------------------------------------------------------
 
-export type FindingKind = "orphan-chrome" | "stray-chrome" | "stale-run-file" | "lock" | "big-log" | "tmp-video";
+export type FindingKind =
+  | "orphan-chrome"
+  | "stray-chrome"
+  | "stale-run-file"
+  | "lock"
+  | "big-log"
+  | "tmp-video"
+  | "link"; // a profile or tmp-video entry that is a symlink/junction: skipped, never fixed
 
 export interface Finding {
   kind: FindingKind;
@@ -256,12 +304,11 @@ export async function doctor(opts: DoctorOptions = {}): Promise<DoctorReport> {
     }
   }
 
-  // Locks left in profiles nobody holds.
-  let profileNames: string[] = [];
-  try {
-    profileNames = (await readdir(profilesDir, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name);
-  } catch {
-    // no profiles yet
+  // Locks left in profiles nobody holds. Linked profiles are reported, never entered.
+  const { dirs: profileNames, links: profileLinks } = await listDirs(profilesDir);
+  for (const name of profileLinks) {
+    const p = path.join(profilesDir, name);
+    findings.push({ kind: "link", profile: name, path: p, detail: `skipped: link ${p}`, fixable: false });
   }
   await Promise.all(
     profileNames.map(async (name) => {
@@ -299,11 +346,10 @@ export async function doctor(opts: DoctorOptions = {}): Promise<DoctorReport> {
 
   // Recording scratch that outlived its recording.
   const tmpRoot = path.join(bxDir, TMP_VIDEO_DIR);
-  let tmpNames: string[] = [];
-  try {
-    tmpNames = await readdir(tmpRoot);
-  } catch {
-    // none
+  const { dirs: tmpNames, links: tmpLinks } = await listDirs(tmpRoot);
+  for (const name of tmpLinks) {
+    const p = path.join(tmpRoot, name);
+    findings.push({ kind: "link", path: p, detail: `skipped: link ${p}`, fixable: false });
   }
   for (const name of tmpNames) {
     const dir = path.join(tmpRoot, name);
@@ -348,10 +394,12 @@ async function applyFix(f: Finding, logsDir: string): Promise<boolean> {
         return true;
       }
       case "tmp-video":
-        if (f.path === undefined) return false;
+        // Re-checked at delete time: it may have become a link since the scan.
+        if (f.path === undefined || (await isLink(f.path))) return false;
         await rm(f.path, { recursive: true, force: true, maxRetries: 2 });
         return true;
       case "stray-chrome":
+      case "link":
         return false;
     }
   } catch {
@@ -400,7 +448,8 @@ export interface GcOptions {
   now?: number;
 }
 
-export type GcAction = "delete" | "keep";
+/** skip: the profile entry is a symlink/junction (why "link"); gc never enters or deletes it. */
+export type GcAction = "delete" | "keep" | "skip";
 
 export interface GcProfile {
   name: string;
@@ -408,17 +457,19 @@ export interface GcProfile {
   /** Newest of Default/Preferences, Local State and the profile's log; the folder's own mtime if none exist. */
   lastUsed: number;
   action: GcAction;
-  /** Why it stays: "default", "live daemon", "chrome running", "keep", "recent". */
+  /** Why it stays: "default", "live daemon", "chrome running", "keep", "recent"; "link" for a skip. */
   why: string;
   /** With caches: bytes in CACHE_DIRS (what --caches frees from a kept profile). */
   cacheBytes?: number;
+  /** With caches: the CACHE_DIRS entries that are real folders (none passing through a link). */
+  cacheDirs?: string[];
   /** With yes: whether the delete / cache clear went through. */
   done?: boolean;
   error?: string;
 }
 
 export interface GcReport {
-  profiles: GcProfile[]; // deletes first (oldest first), then kept (oldest first)
+  profiles: GcProfile[]; // deletes first (oldest first), then kept (oldest first), then links skipped
   totalBytes: number;
   deleteBytes: number;
   cacheBytes: number; // reclaimable from kept profiles' caches (only with caches)
@@ -438,7 +489,7 @@ export function planProfile(
   c: GcCandidate,
   opts: { olderThanDays: number; keep: ReadonlySet<string> },
   now: number,
-): { action: GcAction; why: string } {
+): { action: "delete" | "keep"; why: string } {
   if (c.name === "default") return { action: "keep", why: "default" };
   if (c.live) return { action: "keep", why: "live daemon" };
   if (c.chrome) return { action: "keep", why: "chrome running" };
@@ -483,12 +534,7 @@ export async function gc(opts: GcOptions = {}): Promise<GcReport> {
   const profilesDir = path.join(bxDir, PROFILES_DIR);
   const logsDir = path.join(bxDir, LOGS_DIR);
 
-  let names: string[] = [];
-  try {
-    names = (await readdir(profilesDir, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name);
-  } catch {
-    // no profiles
-  }
+  const { dirs: names, links } = await listDirs(profilesDir);
 
   const live = new Set((await scanDaemons(bxDir)).filter((d) => d.state !== "stale").map((d) => d.profile.toLowerCase()));
   const profilesKey = samePathKey(profilesDir);
@@ -509,21 +555,34 @@ export async function gc(opts: GcOptions = {}): Promise<GcReport> {
     const entry: GcProfile = { name, bytes, lastUsed, ...plan };
     // A running Chrome has its caches open; leave those alone too.
     if (opts.caches && plan.action === "keep" && plan.why !== "live daemon" && plan.why !== "chrome running") {
-      const sizes = await Promise.all(CACHE_DIRS.map((rel) => dirBytes(path.join(dir, rel))));
+      entry.cacheDirs = [];
+      for (const rel of CACHE_DIRS) if (!(await crossesLink(dir, rel))) entry.cacheDirs.push(rel);
+      const sizes = await Promise.all(entry.cacheDirs.map((rel) => dirBytes(path.join(dir, rel))));
       entry.cacheBytes = sizes.reduce((a, b) => a + b, 0);
     }
     return entry;
   });
+  for (const name of links) profiles.push({ name, bytes: 0, lastUsed: 0, action: "skip", why: "link" });
 
   if (opts.yes) {
     await pool(profiles, GC_CONCURRENCY, async (p) => {
       const dir = path.join(profilesDir, p.name);
       try {
+        if (p.action === "skip") return;
+        // Re-checked at delete time: a folder swapped for a link since the scan is skipped.
+        if (await isLink(dir)) {
+          p.action = "skip";
+          p.why = "link";
+          return;
+        }
         if (p.action === "delete") {
           await rm(dir, { recursive: true, force: true, maxRetries: 2 });
           p.done = true;
         } else if (p.cacheBytes !== undefined && p.cacheBytes > 0) {
-          for (const rel of CACHE_DIRS) await rm(path.join(dir, rel), { recursive: true, force: true, maxRetries: 2 });
+          for (const rel of p.cacheDirs ?? []) {
+            if (await crossesLink(dir, rel)) continue;
+            await rm(path.join(dir, rel), { recursive: true, force: true, maxRetries: 2 });
+          }
           p.done = true;
         }
       } catch (err) {
@@ -533,7 +592,8 @@ export async function gc(opts: GcOptions = {}): Promise<GcReport> {
     });
   }
 
-  profiles.sort((a, b) => (a.action === b.action ? a.lastUsed - b.lastUsed : a.action === "delete" ? -1 : 1));
+  const order: Record<GcAction, number> = { delete: 0, keep: 1, skip: 2 };
+  profiles.sort((a, b) => order[a.action] - order[b.action] || a.lastUsed - b.lastUsed || a.name.localeCompare(b.name));
   let totalBytes = 0;
   let deleteBytes = 0;
   let cacheBytes = 0;
@@ -555,6 +615,7 @@ export function formatGc(r: GcReport, opts: { limit?: number; now?: number } = {
   const rows = opts.limit === undefined ? r.profiles : r.profiles.slice(0, opts.limit);
   const width = Math.max(4, ...rows.map((p) => p.name.length));
   const lines = rows.map((p) => {
+    if (p.action === "skip") return `skipped: link  ${p.name}`;
     const age = Math.floor((now - p.lastUsed) / DAY_MS);
     const verb = p.action === "delete" ? (r.applied ? (p.done ? "deleted" : "FAILED") : "delete") : "keep";
     const cache = p.cacheBytes !== undefined && p.cacheBytes > 0 ? ` · caches ${formatBytes(p.cacheBytes)}` : "";
