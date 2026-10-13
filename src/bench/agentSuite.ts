@@ -6,7 +6,10 @@
 //
 //   bun src/bench/bench.ts --agent-suite [--tier haiku[,sonnet,opus,ladder]]
 //     [--tasks <n>|<id,id,…>] [--repeat <n>] [--budget <usd>] [--max-wall <s>]
-//     [--profile <p>] [--headed]
+//     [--profile <p>] [--headed] [--max-total <usd>]
+//
+// --max-total stops the suite once the summed estimate crosses it; the
+// results written are then marked partial.
 //
 // Spends real tokens: every task is one full agent run per tier per repeat.
 // Results land in bench-agent-results.json at the repo root.
@@ -457,6 +460,7 @@ interface SuiteArgs {
   repeat: number;
   budgetUsd: number;
   maxWallMs: number;
+  maxTotalUsd: number | undefined;
 }
 
 const DEFAULT_BUDGET_USD = 1;
@@ -504,6 +508,7 @@ function parseSuiteArgs(argv: string[]): SuiteArgs {
     repeat: Math.floor(positive("repeat", 1)),
     budgetUsd: positive("budget", DEFAULT_BUDGET_USD),
     maxWallMs: positive("max-wall", DEFAULT_MAX_WALL_S) * 1000,
+    maxTotalUsd: value("max-total") === undefined ? undefined : positive("max-total", 0),
   };
 }
 
@@ -527,11 +532,18 @@ export async function runAgentSuite(argv: string[]): Promise<void> {
   const pages = startPageServer();
   const env: Env = { profile: args.profile, fixture: `http://127.0.0.1:${run.port}/fixture`, pages };
   const runs: TaskRun[] = [];
+  let capped = false;
+  const spent = (): number => runs.reduce((n, r) => n + r.estUsd, 0);
 
   try {
-    for (const tier of args.tiers) {
+    suite: for (const tier of args.tiers) {
       for (let repeat = 1; repeat <= args.repeat; repeat++) {
         for (const task of args.tasks) {
+          if (args.maxTotalUsd !== undefined && spent() >= args.maxTotalUsd) {
+            console.log(`stopping: est $${spent().toFixed(4)} reached --max-total $${args.maxTotalUsd}`);
+            capped = true;
+            break suite;
+          }
           await task.setup(env);
           const report = await runAgent(
             {
@@ -593,7 +605,7 @@ export async function runAgentSuite(argv: string[]): Promise<void> {
     repeat: args.repeat,
     budgetUsd: args.budgetUsd,
     maxWallMs: args.maxWallMs,
-    partial: args.tasks.length < TASKS.length,
+    partial: capped || args.tasks.length < TASKS.length,
     tiers,
     runs,
   };
