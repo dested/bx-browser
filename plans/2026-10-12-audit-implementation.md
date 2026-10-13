@@ -198,6 +198,75 @@ All optional fields; the full text is in `G:\code\bx\src\protocol.ts` once lande
 
 **Done when.** Per item: tsc silent, smoke passes on `core-smoke`, the item's own check pasted (numbers where the item has one). Ready line per item or per pair; don't batch more than two.
 
+## Wave 3 (Sal, 2026-10-12): recording redesign, .NET front door, speed plumbing
+
+Sal's answers: V1 "Full design", .NET "Build bx.exe", cleanup "Both" (done: doctor --fix 17 fixed, gc --yes 168 profiles / 12.70 GB). Source: `G:\code\bx\plans\2026-10-12-speed-research.md` (scout). Read its Q2/Q3 sections and recommendations 4–6 before starting.
+
+### Ownership, wave 3
+
+| Path | Owner |
+| --- | --- |
+| `src/daemon/session.ts`, `src/daemon/daemon.ts`, `src/daemon/serialize.ts` | core |
+| `src/daemon/record.ts`, `src/daemon/screencast.ts` (new), `src/daemon/harness/**`, `scripts/build-harness.ts`, `tests/record.test.ts`, `tests/screencast.test.ts` (new) | recorder |
+| `dotnet/**` (new), `src/cli.ts`, `src/client.ts`, `src/argv/**` (new), `src/script.ts`, `scripts/build-frontdoor.ts` (new), `tests/argv.test.ts` (new), `tests/target.test.ts`, `tests/script.test.ts` | frontdoor |
+| `src/agent/**`, `src/bench/**` | agentkit |
+| `src/protocol.ts`, `src/constants.ts`, `src/maintenance.ts`, `skill/SKILL.md`, cliffnotes kit, decisions.md, plans/, package.json, bun.lock, `tests/smoke.test.ts` | lead |
+
+cli.ts and client.ts move from the lead to frontdoor for this wave. Anyone else's CLI lines (recorder's record verbs) go to the lead, who forwards them to frontdoor.
+
+### core, wave 3 (opus-high, running)
+
+- **K1 click fast path** (scout rec 4). In `click`: resolve, then one in-page check on the element: connected, visible (`checkVisibility`), not disabled, `getAnimations({subtree:false})` empty for it and its ancestors, box inside the viewport, and `document.elementFromPoint(center)` is the element or a descendant (pierce open shadow roots via `shadowRoot.elementFromPoint`). All pass → `page.mouse.click(cx, cy)` (trusted CDP input). Any fail, or the element sits in an iframe → today's `locator.click`. `dblclick`/modifiers keep locator.click. Measure click p50 before/after (scout: 33 → 2.5 ms); the Link-mimic trusted-click proof and smoke must stay green.
+- **K2 cold start** (scout rec 5). `module.enableCompileCache()` first thing in daemon.ts (guard: exists in Node 22.1+). Start `import("playwright-core")` right after `listen` (don't await), and start the browser launch right after the run file is written when the profile is headed-or-headless known (it always is). Measure cold `bx js 1` on a fresh profile before/after (scout: 805–833 ms).
+- **K3 /argv route** for frontdoor, when frontdoor sends the hand-off.
+- **K4 recording wiring** for recorder (remove the recordVideo relaunch path from session.ts), when recorder sends the hand-off.
+
+### recorder (opus-high, new)
+
+**Goal.** Recording that never relaunches Chrome: instant start and stop, one tab chosen up front, markers, a rolling buffer, the video written once, distill off the stop path.
+
+**Design (decided; scout Q3 "Design: the replacement").** Protocol lands with your first commit from `C:\Users\dested\AppData\Local\Temp\claude\G--code-bx\59a40366-a580-4bd0-94fc-275be2815c92\scratchpad\lead\protocol-v1.diff` (read it; the lead commits protocol.ts alongside your commit, so send "protocol-v1 now" with your sha). Commands: recordStart {slug, tab?, follow?, ring?, fps?}, recordStop {outDir, distill?, mp4?}, recordMark {text}, recordSave {lastSecs, outDir, mp4?}, recordStatus, recordDistill {dir}.
+- Capture: `src/daemon/screencast.ts`, a CDP session per recorded page, `Page.startScreencast {format:"jpeg", quality:70, everyNthFrame: fps===60?1:2, maxWidth/maxHeight: viewport}`, ack every frame on arrival. Frames go to our own `spawn` of Playwright's ffmpeg (windowsHide; reuse record.ts's ensureFfmpeg) with recordVideo's VP8 args at constant 25 fps, duplicating frames by timestamp. Start fails with `internal` "no frame within 1000 ms" if no frame arrives. Ring mode buffers JPEG frames in memory capped by seconds and 64 MB (oldest dropped) and encodes only on save/stop.
+- `follow`: re-target on active-tab change (session exposes an `onActiveChange` hook through K4). A tab closed mid-recording ends with a `mark` "tab closed".
+- Never start a screencast while Playwright's `recordVideo` or `page.screencast` is on the same page; nothing in bx uses either after K4.
+- Package: `video.webm` once, `video.mp4` with `mp4` (system ffmpeg + libx264 on PATH, else `bad_request`), `transcript.txt` (action log + marks with mm:ss.mmm offsets), `recording.json` (frame times, tab, marks, fps), `report.md` from distill. Distill: phase 1 = today's harness on the webm, run in the background after stop (stop returns `distill: "running"`; `--distill` waits). recordStatus lists running distills. Report wording says "action log", never "spoken"/"speaker".
+- Marks: `recordMark` appends an action-log entry `{cmd:"recordMark", text}` (session's appendAction via K4 hand-off).
+- Phase 2 keyframes from the JPEG stream: not in this wave.
+- CLI (send exact lines to the lead → frontdoor): `bx record start [slug] [--tab <id> | --follow] [--ring <secs>] [--fps 30|60]` (slug default `rec-<yyyymmdd-hhmmss>`), `bx record mark "<text>"`, `bx record stop [--distill] [--mp4]`, `bx record save --last <secs> [slug] [--mp4]`, `bx record status`, `bx record distill <dir>`.
+- `bx run --record` keeps working on the new path.
+
+**Owns.** See the table. session.ts changes (remove recordVideo relaunch + RelaunchOptions recording use, add onActiveChange, appendAction access for marks) go to the lead as a hand-off file for core.
+
+**Sample checkpoint (report before building further).** screencast.ts + record start/stop on the fixture with a second tab and a typed value surviving, start/stop times, frames, CPU, webm plays (ffprobe duration). Then ring, marks, follow, mp4, background distill.
+
+**Done when.** tsc silent; record tests pass (unit: frame pacing, ring caps, transcript format; live: start/stop/save/mark/follow on your own profile); `verify.md` "Recording e2e" recipe passes with the new flow (send the lead any recipe text changes); numbers pasted vs scout's.
+
+### frontdoor (opus-high, new)
+
+**Goal.** `bx` answers single commands in ~25 ms on Windows through a NativeAOT front door, with output byte-identical to the Bun CLI.
+
+**Design (decided; scout Q2a).**
+- **Shared argv core, Node-safe:** move argv parsing (argv → globals + Cmd or a non-daemon verb) and result rendering (Cmd result → stdout/stderr/exit code) out of cli.ts into `src/argv/` modules that run under both Bun and Node type stripping (node:* only, no Bun.*, no enums/parameter properties). cli.ts keeps process concerns (stdin, spawning, batch loop, BX_TIMING) and calls the shared core. client.ts's formatters move or are re-exported as needed.
+- **Daemon `/argv`** (core applies via K3): POST `{argv: string[], cwd: string, env: {BX_TIMING?: string}}` with the token → parse with the shared core, dispatch the Cmd in-process (same deadline/journal path as /cmd, client tag from argv), render → `{stdout, stderr, exit}`. Verbs the daemon can't serve (needs stdin, the filesystem of the caller beyond cwd-relative path resolution, spawning, or other daemons) answer `{fallback: true}`.
+- **bx.exe** (`dotnet/bx/`, .NET 10, PublishAot, InvariantGlobalization, no reflection JSON: Utf8JsonReader/Writer): parse only `--profile <p>` (default "default"); read `~/.bx/run/<profile>.json`; raw-socket HTTP/1.1 POST /argv with `Connection: close`; write stdout/stderr bytes as UTF-8; exit with the code. Fall back to `bun <repo>\src\cli.ts <argv>` (inherit stdio, propagate exit) when: no run file, connection refused, `{fallback:true}`, or the verb is in the local list (`run`, `agent`, `bench`, `-`, `do`, `install-skill`, `profiles`, `stop`, `doctor`, `gc`, `help`, `-h`, `--help`). `record` is served by the daemon like any other verb. Repo root = exe's dir parent (`dist/..`) or `BX_HOME`.
+- **Build:** `scripts/build-frontdoor.ts` runs `dotnet publish -c Release -r win-x64` and copies `bx.exe` to `G:\code\bx\dist\bx.exe` (gitignored). Installing it onto PATH is NOT part of this wave; the lead asks Sal.
+- **Parity test:** `tests/argv.test.ts` unit-tests parse/render; a parity script runs every served verb against the fixture through both `bun src/cli.ts` and `dist\bx.exe` and diffs stdout, stderr and exit codes (human and `--json`).
+
+- **F0:** client.ts `START_POLL_MS` 100 → 15 (scout rec 5), measured on a cold `bx js 1`.
+
+**Owns.** See the table. protocol.ts lines → the lead. daemon.ts `/argv` route → hand-off file for core (K3).
+
+**Sample checkpoint (report before the full refactor).** bx.exe posting `js 1` through a minimal `/argv` (core can apply a stub route from your hand-off) with timing vs `bun src/cli.ts js 1`, plus the src/argv module boundary you chose (file list + exported signatures).
+
+**Done when.** tsc silent; argv tests and the parity script pass with zero diffs; timing table (bx.exe vs bun CLI for js 1, click, els, status; cold daemon fallback); `bun test` green.
+
+### Lead, wave 3
+
+- maintenance.ts: add `BrowserMetrics` and `BrowserMetrics-spare.pma` to CACHE_DIRS (scout rec 6).
+- client.ts START_POLL_MS 100 → 15: handed to frontdoor with client.ts (item F0).
+- Forward hand-offs; land protocol-v1 with recorder's first commit; G6 SKILL.md numbers from agentkit.
+- Not doing: chrome-headless-shell (scout rec 7, 17% of starts), Chrome flag sets (measured no-ops; `--disable-features` trap noted in cliffnotes).
+
 ## Standing answers
 
 - (2026-10-12, lead) Batch mode is client-only: `bx -` and `bx do` loop POST /cmd in one process. No `/batch` endpoint. Applies to: all.
@@ -214,21 +283,27 @@ All optional fields; the full text is in `G:\code\bx\src\protocol.ts` once lande
 - (2026-10-12, lead) Resolver doubt 2 reversed (C3b): only a modal (`:modal` dialog or visible aria-modal=true) scopes els; a non-modal open dialog lists first with dialog:true and keeps the background. Doubts 1 (transparent inputs stay visible), 3 (data-bx-ref attribute), 4 (browser tests under Node) accepted. Applies to: resolver.
 - (2026-10-12, lead) core order: A2 → resolver wiring (scratchpadesolver\session-wiring.txt, plus cmd.timeoutMs into resolveTarget) → C6 → G3-daemon. After wiring: resolver deletes distill.ts LEGACY; lead replaces protocol RefEntry and the cliffnotes ref gotcha. Applies to: core, resolver, lead.
 - (2026-10-12, lead) Hand-offs that touch another owner's file go to the lead as exact replacement text in a scratch file (path in the message); the lead forwards to the owner. Applies to: resolver, infra, agentkit.
+- (2026-10-12, Sal) Wave 3 decisions: recording = full V1 design (scout Q3); .NET = a NativeAOT bx.exe front door only, Bun CLI stays as fallback and for other OSes, no .NET daemon; cleanup = both (`bx doctor --fix`, `bx gc --yes`, done by the lead). Applies to: all.
+- (2026-10-12, lead) Wave 3 ownership: cli.ts, client.ts, script.ts and their tests move to frontdoor; record.ts and harness to recorder. CLI lines from anyone else go to the lead as exact text, forwarded to frontdoor. Applies to: all.
+- (2026-10-12, lead) The V1 recording protocol (scratchpad\lead\protocol-v1.diff) lands in protocol.ts only in the same push as recorder's first record.ts commit, since record.ts fails tsc against it. recorder builds against a local copy of the diff and says "protocol-v1 now <sha>". Applies to: recorder, lead.
+- (2026-10-12, lead) bx.exe goes to G:\codex\distx.exe (gitignored); nothing touches PATH or the global bx link this wave. Applies to: frontdoor.
 
-## Ledger (lead, updated 2026-10-12)
+## Ledger (lead, updated 2026-10-12, wave 3)
 
-Board: down · Last pushed: 2e42e9d (gate 94/94, 2026-10-12) · bx-live refreshed from 2e42e9d
+Board: down · Last pushed: 2e42e9d (gate 94/94) · bx-live refreshed from 2e42e9d · `bx doctor --fix` 17 fixed, `bx gc --yes` 168 profiles / 12.70 GB
 
 | Agent | Model | Owns | Item now | Last sha / artifact | Status |
 | --- | --- | --- | --- | --- | --- |
-| scout | opus-xhigh | research report | Q1–Q3 | — | running |
-| core | opus-high | session.ts, daemon.ts, serialize.ts | queue empty; on call for gate failures | …A2 09e65cb C6 1927fc5 G3 41a17a0 C1-wire 5544ca1 (passed) | idle |
-| resolver | opus-high | resolve.ts, distill.ts, tests/resolve.test.ts | all done: C1 C2 C3 C3b C8 S5, C1-fix, LEGACY delete | 4739d97 80d6267 de96220 (passed) | stopped |
-| agentkit | opus-high | src/agent/**, src/bench/** | G2 full run on 2e42e9d (cap $3) → G6 numbers | 483656a b8f4ade 132f915 (passed) | running |
-| infra | opus-high | observe, debug, record, actionLog, orphans, maintenance, flows | all done: O1 O1b O5 D1 D3 D4 F1 F2 F3 R2 R2b | …d66e5a7 aa00266 e7338f8 (passed) | stopped |
-| lead | — | cli, client, protocol, constants, script | doctor/gc wired; agentkit + infra handoffs | 98a40d2 | next: resolver wiring forward, gate |
+| scout | opus-xhigh | research report | done: plans/2026-10-12-speed-research.md | ea409d0 | stopped |
+| core | opus-high | session.ts, daemon.ts, serialize.ts | K1 click fast path → K2 cold start → K3/K4 hand-offs | …C1-wire 5544ca1 (passed) | running |
+| resolver | opus-high | resolve.ts, distill.ts | all done | de96220 (passed) | stopped |
+| agentkit | opus-high | src/agent/**, src/bench/** | G2 full run on 2e42e9d (cap $3) → G6 numbers | 548a1ab | running |
+| infra | opus-high | observe, debug, orphans, maintenance(→lead), flows | all done | e7338f8 (passed) | stopped |
+| recorder | opus-high | record.ts, screencast.ts, harness/**, record tests | sample: screencast start/stop | — | spawning |
+| frontdoor | opus-high | dotnet/**, cli.ts, client.ts, src/argv/**, script.ts, argv tests | sample: bx.exe `js 1` via /argv | — | spawning |
+| lead | — | protocol, constants, maintenance, SKILL.md, kit | CACHE_DIRS BrowserMetrics; forward hand-offs | ea409d0 | — |
 
-Live tool: global bx → G:/code/bx-live, refreshed from gated 2e42e9d.
-Background jobs: none
-Waiting on Sal: nothing. Sample approved 2026-10-12; leftover profiles go to `bx gc` (Sal: lead's call). Protocol phase 2 at 7b0db6f.
-Next: review core's sample, then spawn resolver, agentkit, infra
+Live tool: global bx → G:/code/bx-live (2e42e9d). Relink to G:/code/bx at the end.
+Background jobs: agentkit bench (its own).
+Waiting on Sal: nothing. Later: bx.exe on PATH (ask when frontdoor's done).
+Unpushed: 548a1ab, ea409d0 and this plan commit.
