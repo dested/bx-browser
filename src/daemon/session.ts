@@ -94,7 +94,7 @@ const CONTEXT_GONE = /Execution context was destroyed|Cannot find context/;
 // goto's wording when the page navigated itself away before load.
 const REDIRECTED_AWAY = /ERR_ABORTED|interrupted by another navigation|frame was detached/;
 // open (R4): the URL must hold this long before the page counts as arrived.
-const URL_QUIET_MS = 300;
+const URL_QUIET_MS = 150;
 const URL_SETTLE_CAP_MS = 3000;
 
 function normalizeUrl(url: string): string {
@@ -744,17 +744,19 @@ export class Session {
       HAS_SCHEME.test(cmd.url) || OPAQUE_SCHEME.test(cmd.url) ? cmd.url : `https://${cmd.url}`;
     const page = await this.pageFor(cmd.tab);
     const urlBefore = page.url();
+    let interrupted = false;
     try {
       step("navigate");
-      await page.goto(url, { waitUntil: "load", timeout: 15000 });
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
     } catch (err) {
-      // A page that redirects itself before load (auth guards) makes goto
+      // A page that redirects itself before it parses (auth guards) makes goto
       // report its own navigation as aborted while the redirect carries on.
       // Only a page that went nowhere is a real failure.
       if (!REDIRECTED_AWAY.test(errorMessage(err)) || page.url() === urlBefore) throw err;
+      interrupted = true;
     }
     step("wait for redirects");
-    await this.urlSettled(page);
+    await this.urlSettled(page, interrupted);
     let scan: DistillResult;
     try {
       step("scan");
@@ -763,7 +765,7 @@ export class Session {
       // It redirected again after the quiet window; scan the page it landed on.
       if (!CONTEXT_GONE.test(errorMessage(err))) throw err;
       step("wait for redirects");
-      await this.urlSettled(page);
+      await this.urlSettled(page, true);
       step("scan");
       scan = await this.scan(page);
     }
@@ -778,22 +780,27 @@ export class Session {
   }
 
   /**
-   * Client-side redirects land after `load`: wait until the main frame's URL
-   * has held for URL_QUIET_MS (capped), then for the final document's load.
+   * Client-side redirects land after the document parses: wait until the main
+   * frame's URL has held for URL_QUIET_MS (capped). Only when it moved is the
+   * final document's `load` worth waiting for (`moved`: it already had, under
+   * goto); a page that stayed put is already usable at domcontentloaded.
    */
-  private async urlSettled(page: Page): Promise<void> {
+  private async urlSettled(page: Page, moved = false): Promise<void> {
     const started = Date.now();
-    let last = page.url();
+    const first = page.url();
+    let last = first;
     let since = started;
     while (Date.now() - since < URL_QUIET_MS && Date.now() - started < URL_SETTLE_CAP_MS) {
-      await sleep(50);
+      await sleep(25);
       const now = page.url();
       if (now !== last) {
         last = now;
         since = Date.now();
       }
     }
-    await page.waitForLoadState("load", { timeout: 5000 }).catch(() => undefined);
+    if (moved || last !== first) {
+      await page.waitForLoadState("load", { timeout: URL_SETTLE_CAP_MS }).catch(() => undefined);
+    }
   }
 
   async els(cmd: CmdOf<"els">): Promise<ElsResult> {
