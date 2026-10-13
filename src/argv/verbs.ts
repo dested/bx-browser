@@ -302,7 +302,7 @@ function renderRecordStatus(d: RecordStatusResult): string {
   if (!d.recording) {
     lines.push("not recording");
   } else {
-    const parts = [`tab ${d.tab ?? "?"}${d.follow === true ? " (follow)" : ""}`];
+    const parts = [`tab id ${d.tab ?? "?"}${d.follow === true ? " (follow)" : ""}`];
     if (d.ring !== undefined) parts.push(`ring ${d.ring}s, ${((d.bufferedBytes ?? 0) / 1_048_576).toFixed(1)} MB held`);
     parts.push(`${((d.elapsedMs ?? 0) / 1000).toFixed(1)}s`, `${d.frames ?? 0} frames`, `${d.marks ?? 0} marks`);
     lines.push(`● recording "${d.slug ?? ""}" — ${parts.join(", ")}`);
@@ -672,7 +672,7 @@ export async function runVerb(g: Globals, command: string, args: string[], io: V
           g,
           { cmd: "recordStart", slug, tab, follow: follow || undefined, ring, fps },
           (d) =>
-            `● recording "${d.slug}" — tab ${d.tab}${follow ? " (follow)" : ""}` +
+            `● recording "${d.slug}" — tab id ${d.tab}${follow ? " (follow)" : ""}` +
             `${d.ring === undefined ? "" : `, last ${d.ring}s kept in memory`}, first frame in ${d.firstFrameMs} ms\n` +
             (d.ring === undefined
               ? '  bx record mark "<text>" · bx record stop'
