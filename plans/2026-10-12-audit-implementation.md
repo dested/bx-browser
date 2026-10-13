@@ -220,10 +220,10 @@ Board: down · Last pushed: b3dc301 (origin/main; local main ahead, unpushed) ·
 | Agent | Model | Owns | Item now | Last sha / artifact | Status |
 | --- | --- | --- | --- | --- | --- |
 | scout | opus-xhigh | research report | Q1–Q3 | — | running |
-| core | opus-high | session.ts, daemon.ts, serialize.ts | A2 → C6 → G3-daemon → infra S1–S9/D1–D3 → resolver wiring | SP1 SP2 O2 C4 C5 S4 6f263e5 A3 f0e821b (all passed) | running |
+| core | opus-high | session.ts, daemon.ts, serialize.ts | A2 → C6 → G3-daemon → resolver wiring | …A3 f0e821b, infra-handoff e1bc41b (passed) | running |
 | resolver | opus-high | resolve.ts, distill.ts, tests/resolve.test.ts | C1 C2 C3 C8 S5 | — | running |
 | agentkit | opus-high | src/agent/**, src/bench/** | waits on lead sha for full run | 483656a b8f4ade 132f915 (passed) | idle |
-| infra | opus-high | observe, debug, record, actionLog, orphans, maintenance, flows, tests/observe.test.ts | R2b link guard; debug.ts shim swap after core S8 | …10a070c, 8a03963 (passed) | running |
+| infra | opus-high | observe, debug, record, actionLog, orphans, maintenance, flows | all done: O1 O1b O5 D1 D3 D4 F1 F2 F3 R2 R2b | …d66e5a7 aa00266 e7338f8 (passed) | stopped |
 | lead | — | cli, client, protocol, constants, script | doctor/gc wired; agentkit + infra handoffs | 98a40d2 | next: resolver wiring forward, gate |
 
 Live tool: global bx → G:/code/bx-live (a80f037), relinked by Sal 2026-10-12.
