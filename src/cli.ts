@@ -23,7 +23,7 @@ import {
   stopAllDaemons,
   stopDaemon,
 } from "./client.ts";
-import { runFlow } from "./flows/runner.ts";
+import { splitScript, splitWords } from "./script.ts";
 import type {
   ActionResult,
   AgentModel,
@@ -67,10 +67,13 @@ Observation
   snap [path] [--full]             screenshot, downscaled; --full for whole page
   console [--all] [--filter <re>]  console entries (errors + warnings by default)
   net [--failed] [--filter <re>]   network requests
-  js <expression>                  evaluate an expression in the page
+  js <code | - | @file.js>         run JS in the page: an expression, or statements
+                                   whose last expression is the result; - reads
+                                   stdin, @file reads a file (no shell quoting)
   status                           daemon, browser, tabs and recording state
 
-Interaction  (<target> = ref number | selector (#, ., [, //, css=, xpath=) | visible text)
+Interaction  (<target> = @ref | selector (#, ., [, //, css=, xpath=) | visible text;
+              a bare number is a ref when that ref exists, otherwise text)
   click <target>                   click an element
   fill <target> <value>            set an input's value
   press <key>                      press a key, e.g. Enter or Control+a
@@ -117,6 +120,12 @@ Flows and automation
                                    is the success predicate — verified before a
                                    pass is accepted
 
+Batch  (one process, many commands: ~1-3 ms each after the first)
+  -                                read commands from stdin, one per line
+  do "<cmd>; <cmd>; ..."           run several commands from one argument
+                                   both stop at the first failure unless
+                                   --keep-going; --json prints one line each
+
 Setup
   install-skill                    copy the bx skill into ~/.claude/skills/bx so
                                    Claude Code reaches for bx on its own
@@ -133,6 +142,8 @@ Flags
   --headless                       launch headless when starting the daemon
   --timeout <ms>                   override the 5000ms default on click, fill,
                                    select, wait and expect
+  --deadline <ms>                  give up on a command after this long (default
+                                   10000, or --timeout + 5000 when longer)
   --json                           print raw JSON instead of text; exit code unchanged
   -h, --help                       this text, from anywhere in the command line
 
@@ -155,6 +166,10 @@ interface Globals {
   // undefined = the user did not ask; adopt whatever daemon is already running.
   headless: boolean | undefined;
   json: boolean;
+  // Per-command daemon deadline (--deadline <ms>); undefined = client default.
+  deadlineMs: number | undefined;
+  // True while running a `bx -` / `bx do` batch: stdin is the script.
+  batch: boolean;
 }
 
 // MSYS path conversion: Git Bash rewrites a bare `/foo` argument to
@@ -179,6 +194,7 @@ function extractGlobals(argv: string[]): { globals: Globals; rest: string[] } {
   let profile = "default";
   let headless: boolean | undefined;
   let json = false;
+  let deadlineMs: number | undefined;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -198,9 +214,18 @@ function extractGlobals(argv: string[]): { globals: Globals; rest: string[] } {
       json = true;
       continue;
     }
+    if (arg === "--deadline") {
+      const ms = Number(argv[i + 1]);
+      if (!Number.isInteger(ms) || ms < 1000) {
+        throw new CliError(2, "--deadline takes a whole number of milliseconds, 1000 or more");
+      }
+      deadlineMs = ms;
+      i++;
+      continue;
+    }
     rest.push(arg);
   }
-  return { globals: { profile, headless, json }, rest };
+  return { globals: { profile, headless, json, deadlineMs, batch: false }, rest };
 }
 
 function takeFlag(args: string[], name: string): boolean {
@@ -372,7 +397,7 @@ function reportTiming(): void {
 }
 
 function exitCodeFor(code: BxError["code"]): number {
-  if (code === "browser_launch_failed" || code === "internal") return 3;
+  if (code === "browser_launch_failed" || code === "browser_dead" || code === "internal") return 3;
   if (code === "bad_request") return 2;
   return 1;
 }
@@ -386,6 +411,9 @@ function printError(error: BxError): void {
 }
 
 function emit<T>(g: Globals, res: CmdResult<T>, render: (data: T) => string): number {
+  if (res.ok && res.relaunched === true) {
+    process.stderr.write("note: the browser had closed, so bx relaunched it (earlier tabs are gone)\n");
+  }
   if (g.json) {
     printJson(res.ok ? res.data : res.error);
     return res.ok ? 0 : exitCodeFor(res.error.code);
@@ -398,13 +426,38 @@ function emit<T>(g: Globals, res: CmdResult<T>, render: (data: T) => string): nu
   return 0;
 }
 
+function opts(g: Globals): { headless: boolean | undefined; deadlineMs: number | undefined } {
+  return { headless: g.headless, deadlineMs: g.deadlineMs };
+}
+
 async function send<T>(g: Globals, c: Cmd, render: (data: T) => string): Promise<number> {
-  const res = await cmd<T>(g.profile, c, { headless: g.headless });
+  const res = await cmd<T>(g.profile, c, opts(g));
   return emit(g, res, render);
 }
 
 function q(s: string): string {
   return JSON.stringify(s);
+}
+
+/**
+ * `bx js -` reads the code from stdin and `bx js @file.js` from a file, so
+ * multi-line code needs no shell quoting. Anything else is the code itself.
+ */
+async function jsSource(g: Globals, args: string[]): Promise<string> {
+  const first = args[0];
+  if (args.length === 1 && first === "-") {
+    if (g.batch) throw new CliError(2, "bx js - reads stdin, which a batch is already using: use js @file.js");
+    return (await Bun.stdin.text()).trim();
+  }
+  if (args.length === 1 && first !== undefined && first.startsWith("@") && first.length > 1) {
+    const file = path.resolve(process.cwd(), first.slice(1));
+    try {
+      return fs.readFileSync(file, "utf8").trim();
+    } catch {
+      throw new CliError(2, `bx js: can't read ${file}`);
+    }
+  }
+  return args.join(" ").trim();
 }
 
 // The tab verbs answer with the whole tab list, so confirm the change and then
@@ -439,6 +492,7 @@ function renderStatus(s: StatusResult): string {
     `profile   ${s.profile}${s.headless ? " (headless)" : ""}`,
     `browser   ${s.browserRunning ? `running, up ${fmtDuration(s.uptimeMs)}` : "not running"}`,
     `recording ${s.recording ?? "none"}`,
+    ...(s.relaunches > 0 ? [`relaunched ${s.relaunches}× after the browser closed`] : []),
     `tabs      ${s.pages.length}`,
   ];
   for (const page of s.pages) lines.push(`  ${renderPage(page)}`);
@@ -557,7 +611,7 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
       const res = await cmd<ExpectResult>(
         g.profile,
         { cmd: "expect", kind, value, timeoutMs },
-        { headless: g.headless },
+        opts(g),
       );
       const code = emit(g, res, (d) =>
         d.pass
@@ -638,7 +692,7 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
       const res = await cmd<DriveResult>(
         g.profile,
         { cmd: "drive", install, until, timeoutMs, pollMs },
-        { headless: g.headless },
+        opts(g),
       );
       const code = emit(g, res, (d) =>
         d.satisfied
@@ -684,8 +738,8 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
     }
 
     case "js": {
-      const expression = args.join(" ").trim();
-      if (expression.length === 0) throw new CliError(2, "usage: bx js <expression>");
+      const expression = await jsSource(g, args);
+      if (expression.length === 0) throw new CliError(2, "usage: bx js <expression | - | @file.js>");
       return send<JsResult>(g, { cmd: "js", expression }, (d) =>
         d.truncated ? `${d.value}\n…(truncated)` : d.value,
       );
@@ -740,6 +794,9 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
       const record = takeFlag(args, "--record");
       const file = args[0];
       if (file === undefined) throw new CliError(2, "usage: bx run <flow.ts> [--record]");
+      // Loaded on demand: the runner pulls in zod and the flow synthesizer,
+      // which no other verb needs on its startup path.
+      const { runFlow } = await import("./flows/runner.ts");
       const passed = await runFlow(file, { profile: g.profile, record });
       return passed ? 0 : 1;
     }
@@ -762,7 +819,7 @@ async function dispatch(g: Globals, command: string, args: string[]): Promise<nu
         const status = await cmd<StatusResult>(
           g.profile,
           { cmd: "status" },
-          { headless: g.headless },
+          opts(g),
         );
         if (!status.ok) return emit(g, status, renderStatus);
         const slug = status.data.recording;
@@ -941,16 +998,62 @@ async function main(argv: string[]): Promise<number> {
     return 0;
   }
 
+  if (command === "-" || command === "do") {
+    const keepGoing = takeFlag(args, "--keep-going");
+    const script = command === "-" ? await Bun.stdin.text() : args.join(" ");
+    return runBatch({ ...globals, batch: true }, splitScript(script, command === "do"), keepGoing);
+  }
+
+  return runOne(globals, command, args);
+}
+
+async function runOne(g: Globals, command: string, args: string[]): Promise<number> {
   startedAt = performance.now();
   setClientVia(command);
   let code: number;
   try {
-    code = await dispatch(globals, command, args);
+    code = await dispatch(g, command, args);
   } catch (err: unknown) {
     code = reportFailure(err);
   }
   reportTiming();
   return code;
+}
+
+// ---------------------------------------------------------------------------
+// batch: `bx -` (one command per stdin line) and `bx do "a; b; c"`
+// ---------------------------------------------------------------------------
+
+/**
+ * Runs each line as its own bx command in this one process, so the second
+ * and later commands cost a localhost round trip instead of a process start.
+ * Human output prefixes each command with `▸ <line>`; --json prints one JSON
+ * line per command. Stops at the first failure unless --keep-going.
+ */
+async function runBatch(g: Globals, lines: string[], keepGoing: boolean): Promise<number> {
+  let worst = 0;
+  for (const line of lines) {
+    let words: string[];
+    try {
+      words = splitWords(line);
+    } catch (err: unknown) {
+      worst = Math.max(worst, reportFailure(err));
+      if (!keepGoing) return worst;
+      continue;
+    }
+    const [command, ...args] = words;
+    if (command === undefined) continue;
+    if (command === "-" || command === "do") {
+      worst = Math.max(worst, reportFailure(new CliError(2, "a batch can't start another batch")));
+      if (!keepGoing) return worst;
+      continue;
+    }
+    if (!g.json) out(`▸ ${line}`);
+    const code = await runOne(g, command, args);
+    worst = Math.max(worst, code);
+    if (code !== 0 && !keepGoing) return code;
+  }
+  return worst;
 }
 
 const exitCode = await main(process.argv.slice(2)).catch(reportFailure);

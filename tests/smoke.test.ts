@@ -29,7 +29,7 @@ import type {
   TextResult,
 } from "../src/protocol.ts";
 
-const PROFILE = "bxtest";
+const PROFILE = process.env.BX_TEST_PROFILE ?? "bxtest";
 const TIMEOUT = 30_000;
 
 let fixture = "";

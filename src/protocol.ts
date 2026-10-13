@@ -19,11 +19,18 @@ export interface RunFile {
   startedAt: string; // ISO
 }
 
-export const BX_DIR_NAME = ".bx"; // under os.homedir()
-export const RUN_DIR = "run"; // ~/.bx/run/<profile>.json
-export const PROFILES_DIR = "profiles"; // ~/.bx/profiles/<name> (chrome user-data-dir)
-export const SNAPS_DIR = "snaps"; // ~/.bx/snaps/<ts>.png
-export const LOGS_DIR = "logs"; // ~/.bx/logs/<profile>.log (daemon stdout/stderr)
+// Directory names, the client and deadline headers live in constants.ts (no
+// zod there, so the CLI's hot path can load them cheaply).
+export {
+  BX_DIR_NAME,
+  CLIENT_HEADER,
+  DEADLINE_HEADER,
+  DEFAULT_DEADLINE_MS,
+  LOGS_DIR,
+  PROFILES_DIR,
+  RUN_DIR,
+  SNAPS_DIR,
+} from "./constants.ts";
 
 // ---------------------------------------------------------------------------
 // Targets. CLI parsing rule: /^\d+$/ → ref; starts with '#', '.', '[', '//',
@@ -99,12 +106,6 @@ export const BUDGET = {
 // so parallel agents cannot yank pages out from under each other. A pinned
 // command whose tab has been closed fails with code "no_page".
 const tabPin = { tab: z.number().int().nonnegative().optional() };
-
-// Per-command deadline, sent as a request header (not part of Cmd): the
-// daemon answers `deadline` when a command runs longer. Default 10 s, clamped
-// to 1 s..10 min; drive gets its own timeoutMs + 5 s; recordings are exempt.
-export const DEADLINE_HEADER = "x-bx-deadline-ms";
-export const DEFAULT_DEADLINE_MS = 10_000;
 
 // Adaptive settle for actions: after the action the daemon waits until the DOM
 // and the action's network requests are quiet for 50 ms, capped at `settle` ms
@@ -504,7 +505,6 @@ export const HEAPS_DIR = "heaps"; // ~/.bx/heaps/<profile>-<ts>.heapsnapshot
 // Who sent a /cmd. The CLI tags every request so a monitor can say which
 // Claude session (or terminal) is driving which daemon. Sent as
 // encodeURIComponent(JSON.stringify(tag)); a missing or bad tag is ignored.
-export const CLIENT_HEADER = "x-bx-client";
 export const ClientTagSchema = z.object({
   session: z.string().optional(), // the caller's CLAUDE_CODE_SESSION_ID
   cwd: z.string().optional(),

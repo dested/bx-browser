@@ -5,10 +5,23 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { z } from "zod";
-import { BX_DIR_NAME, CLIENT_HEADER, LOGS_DIR, PROFILES_DIR, RUN_DIR, SNAPS_DIR } from "./protocol.ts";
+// No zod here: this module is on every `bx` call's startup path, so it reads
+// constants.ts (not protocol.ts, which builds the zod schemas on load) and
+// checks the two untrusted shapes it sees (the run file and the response
+// envelope) with small hand-written guards.
+import {
+  BX_DIR_NAME,
+  CLIENT_HEADER,
+  DEADLINE_HEADER,
+  DEFAULT_DEADLINE_MS,
+  LOGS_DIR,
+  PROFILES_DIR,
+  RUN_DIR,
+  SNAPS_DIR,
+} from "./constants.ts";
 import type {
   ActionResult,
+  BxError,
   ClientTag,
   Cmd,
   CmdResult,
@@ -63,14 +76,25 @@ export class CliError extends Error {
 // Run file + health
 // ---------------------------------------------------------------------------
 
-const RunFileSchema = z.object({
-  profile: z.string(),
-  pid: z.number(),
-  port: z.number(),
-  token: z.string(),
-  headless: z.boolean(),
-  startedAt: z.string(),
-});
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function toRunFile(v: unknown): RunFile | null {
+  if (!isRecord(v)) return null;
+  const { profile, pid, port, token, headless, startedAt } = v;
+  if (
+    typeof profile !== "string" ||
+    typeof pid !== "number" ||
+    typeof port !== "number" ||
+    typeof token !== "string" ||
+    typeof headless !== "boolean" ||
+    typeof startedAt !== "string"
+  ) {
+    return null;
+  }
+  return { profile, pid, port, token, headless, startedAt };
+}
 
 export function readRunFile(profile: string): RunFile | null {
   let raw: string;
@@ -80,8 +104,7 @@ export function readRunFile(profile: string): RunFile | null {
     return null;
   }
   try {
-    const parsed = RunFileSchema.safeParse(JSON.parse(raw));
-    return parsed.success ? parsed.data : null;
+    return toRunFile(JSON.parse(raw));
   } catch {
     return null;
   }
@@ -104,6 +127,26 @@ export async function isAlive(run: RunFile): Promise<boolean> {
 
 const START_TIMEOUT_MS = 15_000;
 const START_POLL_MS = 100;
+// The daemon's stdout/stderr log rotates when a new daemon starts on a log
+// past this size: <profile>.log -> <profile>.1.log (one generation kept).
+const LOG_ROTATE_BYTES = 5 * 1024 * 1024;
+
+function rotateLog(logPath: string): void {
+  try {
+    if (fs.statSync(logPath).size < LOG_ROTATE_BYTES) return;
+    fs.renameSync(logPath, logPath.replace(/\.log$/, ".1.log"));
+  } catch {
+    // no log yet, or another process holds it: keep appending
+  }
+}
+
+function modeNote(existing: RunFile, opts: { headless: boolean; explicit?: boolean }): void {
+  if (opts.explicit === true && existing.headless !== opts.headless) {
+    process.stderr.write(
+      `note: reusing the running ${existing.headless ? "headless" : "headed"} daemon for "${existing.profile}" — \`bx --profile ${existing.profile} stop\` first to change mode\n`,
+    );
+  }
+}
 
 export async function ensureDaemon(
   profile: string,
@@ -116,17 +159,14 @@ export async function ensureDaemon(
 
   const existing = readRunFile(profile);
   if (existing && (await isAlive(existing))) {
-    if (opts.explicit === true && existing.headless !== opts.headless) {
-      process.stderr.write(
-        `note: reusing the running ${existing.headless ? "headless" : "headed"} daemon for "${profile}" — \`bx --profile ${profile} stop\` first to change mode\n`,
-      );
-    }
+    modeNote(existing, opts);
     return existing;
   }
 
   fs.rmSync(runFilePath(profile), { force: true });
 
   const logPath = path.join(logsDir(), `${profile}.log`);
+  rotateLog(logPath);
   const fd = fs.openSync(logPath, "a");
   try {
     const entry = path.resolve(import.meta.dir, "daemon/daemon.ts");
@@ -226,37 +266,57 @@ export function listProfiles(): { name: string; running: boolean }[] {
 // RPC
 // ---------------------------------------------------------------------------
 
-const ElSchema = z.object({
-  ref: z.number(),
-  tag: z.string(),
-  role: z.string(),
-  name: z.string(),
-  state: z.array(z.string()),
-  testid: z.string().optional(),
-  id: z.string().optional(),
-});
-
-const EnvelopeSchema = z.discriminatedUnion("ok", [
-  z.object({ ok: z.literal(true), data: z.unknown() }),
-  z.object({
-    ok: z.literal(false),
-    error: z.object({
-      code: z.enum([
-        "target_not_found",
-        "stale_ref",
-        "timeout",
-        "no_page",
-        "not_recording",
-        "already_recording",
-        "browser_launch_failed",
-        "bad_request",
-        "internal",
-      ]),
-      message: z.string(),
-      nearMatches: z.array(ElSchema).optional(),
-    }),
-  }),
+const ERROR_CODES: ReadonlySet<string> = new Set<BxError["code"]>([
+  "target_not_found",
+  "stale_ref",
+  "timeout",
+  "no_page",
+  "not_recording",
+  "already_recording",
+  "browser_launch_failed",
+  "browser_dead",
+  "deadline",
+  "ambiguous",
+  "bad_request",
+  "internal",
 ]);
+
+function isErrorCode(v: unknown): v is BxError["code"] {
+  return typeof v === "string" && ERROR_CODES.has(v);
+}
+
+function toEl(v: unknown): El | null {
+  if (!isRecord(v)) return null;
+  const { ref, tag, role, name, state, testid, id } = v;
+  if (typeof ref !== "number" || typeof tag !== "string" || typeof role !== "string") return null;
+  if (typeof name !== "string" || !Array.isArray(state)) return null;
+  return {
+    ref,
+    tag,
+    role,
+    name,
+    state: state.filter((x): x is string => typeof x === "string"),
+    testid: typeof testid === "string" ? testid : undefined,
+    id: typeof id === "string" ? id : undefined,
+  };
+}
+
+type Envelope =
+  | { ok: true; data: unknown; relaunched: boolean }
+  | { ok: false; error: BxError };
+
+function toEnvelope(v: unknown): Envelope | null {
+  if (!isRecord(v)) return null;
+  if (v.ok === true && "data" in v) return { ok: true, data: v.data, relaunched: v.relaunched === true };
+  if (v.ok !== false || !isRecord(v.error)) return null;
+  const { code, message, nearMatches } = v.error;
+  if (!isErrorCode(code) || typeof message !== "string") return null;
+  const error: BxError = { code, message };
+  if (Array.isArray(nearMatches)) {
+    error.nearMatches = nearMatches.map(toEl).filter((el): el is El => el !== null);
+  }
+  return { ok: false, error };
+}
 
 let clientVia: string | undefined;
 
@@ -276,40 +336,86 @@ function clientTag(): string {
   return encodeURIComponent(JSON.stringify(tag));
 }
 
-async function post<T>(run: RunFile, c: Cmd): Promise<CmdResult<T>> {
-  const res = await fetch(`http://127.0.0.1:${run.port}/cmd`, {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-bx-token": run.token, [CLIENT_HEADER]: clientTag() },
-    body: JSON.stringify(c),
-  });
-  const parsed = EnvelopeSchema.safeParse(await res.json());
-  if (!parsed.success) throw new Error(`unexpected daemon response (HTTP ${res.status})`);
-  if (!parsed.data.ok) return { ok: false, error: parsed.data.error };
-  // The envelope is validated; the payload shape is the command's contract in
-  // protocol.ts and is trusted here — this is the one typed boundary.
-  return { ok: true, data: parsed.data.data as T };
+/**
+ * The daemon-side deadline for a command: an explicit one wins; otherwise a
+ * command with its own timeoutMs gets that plus 5 s of headroom, so a long
+ * `--timeout` is never cut short by the default.
+ */
+export function deadlineFor(c: Cmd, explicit?: number): number {
+  if (explicit !== undefined) return explicit;
+  const own = "timeoutMs" in c && typeof c.timeoutMs === "number" ? c.timeoutMs + 5000 : 0;
+  return Math.max(DEFAULT_DEADLINE_MS, own);
 }
 
+// The client waits this long past the daemon's own deadline before giving up
+// on a daemon that stopped answering altogether.
+const CLIENT_GRACE_MS = 5000;
+
+/** True when the request never reached a daemon: the only case that is safe to retry. */
+function neverConnected(err: unknown): boolean {
+  if (!isRecord(err) && !(err instanceof Error)) return false;
+  const code = "code" in err ? err.code : undefined;
+  return code === "ConnectionRefused" || code === "ECONNREFUSED" || code === "FailedToOpenSocket";
+}
+
+async function post<T>(run: RunFile, c: Cmd, deadlineMs: number): Promise<CmdResult<T>> {
+  // drive and recordings carry their own long waits and the daemon sizes their
+  // deadline itself, so the client only bounds the commands it set one for.
+  const longRunning = c.cmd === "drive" || c.cmd === "recordStart" || c.cmd === "recordStop";
+  const res = await fetch(`http://127.0.0.1:${run.port}/cmd`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-bx-token": run.token,
+      [CLIENT_HEADER]: clientTag(),
+      [DEADLINE_HEADER]: String(deadlineMs),
+    },
+    body: JSON.stringify(c),
+    signal: longRunning ? undefined : AbortSignal.timeout(deadlineMs + CLIENT_GRACE_MS),
+  });
+  const envelope = toEnvelope(await res.json());
+  if (envelope === null) throw new Error(`unexpected daemon response (HTTP ${res.status})`);
+  if (!envelope.ok) return { ok: false, error: envelope.error };
+  // The envelope is checked; the payload shape is the command's contract in
+  // protocol.ts and is trusted here. This is the one typed boundary.
+  const data = envelope.data as T;
+  return envelope.relaunched ? { ok: true, data, relaunched: true } : { ok: true, data };
+}
+
+function unreachable(profile: string, err: unknown): CliError {
+  return new CliError(
+    3,
+    `daemon unreachable for profile "${profile}": ${err instanceof Error ? err.message : String(err)}`,
+  );
+}
+
+/**
+ * Sends one command. Fast path: post straight to the daemon named in the run
+ * file, with no /health round trip. Only when that connection is refused (no
+ * daemon, or a stale run file) does it discover or spawn one and retry. A
+ * request that reached a daemon is never re-sent, so an action can't run twice.
+ */
 export async function cmd<T>(
   profile: string,
   c: Cmd,
-  opts?: { headless?: boolean },
+  opts?: { headless?: boolean; deadlineMs?: number },
 ): Promise<CmdResult<T>> {
   const start = { headless: opts?.headless ?? false, explicit: opts?.headless !== undefined };
+  const deadlineMs = deadlineFor(c, opts?.deadlineMs);
+  const known = readRunFile(profile);
+  if (known !== null) {
+    modeNote(known, start);
+    try {
+      return await post<T>(known, c, deadlineMs);
+    } catch (err) {
+      if (!neverConnected(err)) throw unreachable(profile, err);
+    }
+  }
   const run = await ensureDaemon(profile, start);
   try {
-    return await post<T>(run, c);
-  } catch {
-    // The daemon may have died between discovery and the request; respawn once.
-    const fresh = await ensureDaemon(profile, start);
-    try {
-      return await post<T>(fresh, c);
-    } catch (err) {
-      throw new CliError(
-        3,
-        `daemon unreachable for profile "${profile}": ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
+    return await post<T>(run, c, deadlineMs);
+  } catch (err) {
+    throw unreachable(profile, err);
   }
 }
 
@@ -323,8 +429,15 @@ export function isSelectorLike(s: string): boolean {
   return SELECTOR_PREFIXES.some((prefix) => s.startsWith(prefix));
 }
 
+/**
+ * `@12` is a ref. Bare digits ("2") could be a ref or a button labelled 2, so
+ * they go as {ref, orText} and the daemon uses the ref only when it is live in
+ * the page's registry. Selector-looking strings are selectors; the rest is text.
+ */
 export function parseTarget(s: string): Target {
-  if (/^\d+$/.test(s)) return { ref: Number(s) };
+  const at = /^@(\d+)$/.exec(s);
+  if (at?.[1] !== undefined) return { ref: Number(at[1]) };
+  if (/^\d+$/.test(s)) return { ref: Number(s), orText: s };
   if (isSelectorLike(s)) return { selector: s };
   return { text: s };
 }
