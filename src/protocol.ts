@@ -79,18 +79,10 @@ export interface El {
   dialog?: boolean; // inside the open modal/dialog (listed first)
 }
 
-// Ref registry entry stored daemon-side. generation increments on every els
-// scan and every navigation; a ref from an older generation errors with
-// "stale ref — re-run els".
-export interface RefEntry {
-  ref: number;
-  generation: number;
-  // Resolution strategies, tried in order.
-  testid?: string;
-  domId?: string;
-  role?: { role: string; name: string };
-  cssPath: string; // nth-child chain fallback, always present
-}
+// Refs (daemon/resolve.ts): each page's `window.__bx` maps ref → WeakRef(element), so a
+// ref names the element itself and survives re-scans. A ref goes stale only when its
+// element leaves the page (or its document is replaced); numbers are never reused
+// within a tab.
 
 // ---------------------------------------------------------------------------
 // Output budgets (characters; ~4 chars/token). Enforced daemon-side so no
@@ -352,7 +344,7 @@ export interface OpenResult {
   redirectedTo?: string; // final URL when the page redirected itself after load
 }
 export interface ElsResult {
-  generation: number;
+  generation: number; // this tab's scan count (refs no longer expire per scan)
   els: El[];
   total: number; // total interactive found (may exceed els.length)
   truncated: boolean;
