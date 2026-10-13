@@ -1,160 +1,196 @@
-@import "tailwindcss";
+/*
+ * No slop. Not a design system, not a framework — one small stylesheet that
+ * makes plain semantic HTML read like a document: a centered column, room to
+ * breathe, classic bordered tables, blue links, a little green. The point is
+ * honesty, the same thing bx ships. Header, subheader, eyebrow, numbers. Done.
+ */
 
-@theme {
-  --color-ink: #08090a;
-  --color-panel: #0d0f11;
-  --color-panel-2: #121417;
-  --color-line: #1f242a;
-  --color-line-soft: #171b1f;
-  --color-fog: #8a949e;
-  --color-fog-dim: #626c76;
-  --color-chalk: #e4ebf1;
-  --color-acid: #46e08a;
-  --color-acid-deep: #1d7a4c;
-  --color-flare: #ff6a5c;
-  --color-amber: #eab543;
-
-  --font-mono: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Consolas,
-    "Liberation Mono", monospace;
-  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
-    Arial, sans-serif;
+body {
+  max-width: 44em;
+  margin: 3em auto;
+  padding: 0 1.6em;
+  line-height: 1.65;
+  color: #1a1a1a;
+  background: #ffffff;
 }
 
-@layer base {
-  html {
-    scroll-behavior: smooth;
-    -webkit-text-size-adjust: 100%;
-  }
-
-  body {
-    background-color: var(--color-ink);
-    color: var(--color-chalk);
-    font-family: var(--font-sans);
-    -webkit-font-smoothing: antialiased;
-    text-rendering: optimizeLegibility;
-  }
-
-  ::selection {
-    background: color-mix(in oklab, var(--color-acid) 30%, transparent);
-    color: #fff;
-  }
-
-  :focus-visible {
-    outline: 2px solid var(--color-acid);
-    outline-offset: 2px;
-    border-radius: 2px;
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    html {
-      scroll-behavior: auto;
-    }
-    *,
-    *::before,
-    *::after {
-      animation-duration: 0.01ms !important;
-      animation-iteration-count: 1 !important;
-      transition-duration: 0.01ms !important;
-    }
-  }
+h1 {
+  margin: 0 0 0.1em;
+  font-size: 2.4em;
 }
 
-@utility grid-lines {
-  background-image: linear-gradient(
-      to right,
-      color-mix(in oklab, var(--color-line) 55%, transparent) 1px,
-      transparent 1px
-    ),
-    linear-gradient(
-      to bottom,
-      color-mix(in oklab, var(--color-line) 55%, transparent) 1px,
-      transparent 1px
-    );
-  background-size: 56px 56px;
+h2 {
+  margin: 2.2em 0 0.5em;
+  line-height: 1.3;
 }
 
-@keyframes bx-blink {
-  0%,
-  49% {
-    opacity: 1;
-  }
-  50%,
-  100% {
-    opacity: 0;
-  }
+h3 {
+  margin: 1.9em 0 0.4em;
 }
 
-@keyframes bx-pulse {
-  0%,
-  100% {
-    opacity: 0.35;
-  }
-  50% {
-    opacity: 1;
-  }
+p,
+ul,
+pre,
+table {
+  margin: 0.95em 0;
 }
 
-@keyframes bx-marquee {
-  from {
-    transform: translateY(0);
-  }
-  to {
-    transform: translateY(-50%);
-  }
+ul {
+  padding-left: 1.4em;
 }
 
-.bx-marquee {
-  animation: bx-marquee 48s linear infinite;
+li {
+  margin: 0.3em 0;
 }
 
-@keyframes bx-sweep {
-  0% {
-    transform: translateX(-100%);
-  }
-  100% {
-    transform: translateX(400%);
-  }
+hr {
+  margin: 3em 0;
+  border: 0;
+  border-top: 1px solid #cccccc;
 }
 
-/* Code blocks may scroll, but the scrollbar shouldn't shout. */
-.bx-scroll {
-  scrollbar-width: thin;
-  scrollbar-color: var(--color-line) transparent;
-}
-.bx-scroll::-webkit-scrollbar {
-  height: 6px;
-}
-.bx-scroll::-webkit-scrollbar-track {
-  background: transparent;
-}
-.bx-scroll::-webkit-scrollbar-thumb {
-  background: var(--color-line);
-  border-radius: 3px;
+a {
+  color: #0645ad;
 }
 
-.bx-cursor {
-  display: inline-block;
-  width: 0.55em;
-  height: 1.05em;
-  vertical-align: text-bottom;
-  background: var(--color-acid);
-  animation: bx-blink 1.05s steps(1, end) infinite;
+code {
+  font-family: ui-monospace, "Courier New", monospace;
 }
 
-.bx-waiting {
-  animation: bx-pulse 1.1s ease-in-out infinite;
+pre {
+  border: 1px solid #cccccc;
+  background: #f6f6f6;
+  padding: 0.85em 1em;
+  overflow-x: auto;
+  line-height: 1.5;
 }
 
-.bx-sweep::after {
-  content: "";
-  position: absolute;
-  inset-block: 0;
-  width: 25%;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    color-mix(in oklab, var(--color-flare) 55%, transparent),
-    transparent
-  );
-  animation: bx-sweep 1.6s linear infinite;
+table {
+  border-collapse: collapse;
+}
+
+th,
+td {
+  border: 1px solid #999999;
+  padding: 6px 12px;
+  text-align: left;
+  vertical-align: top;
+}
+
+th {
+  background: #eeeeee;
+}
+
+.eyebrow {
+  margin: 2.6em 0 -0.3em;
+  color: #777777;
+  font-size: 0.82em;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.bx {
+  color: #0a7d34;
+}
+
+.pass {
+  color: #0a7d34;
+  font-weight: bold;
+}
+
+.fail {
+  color: #c0392b;
+  font-weight: bold;
+}
+
+footer {
+  margin-top: 3em;
+  color: #555555;
+  font-size: 0.92em;
+}
+
+/* simple bar charts — the numbers, drawn, no library */
+.chart {
+  margin: 1.4em 0;
+}
+
+.chart h3 {
+  margin-bottom: 0.1em;
+}
+
+.chart-unit {
+  margin: 0 0 0.7em;
+  color: #777777;
+  font-size: 0.82em;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+table.bars {
+  width: 100%;
+}
+
+table.bars td {
+  border: none;
+  padding: 3px 0;
+  vertical-align: middle;
+}
+
+td.bar-label {
+  white-space: nowrap;
+  padding-right: 1em;
+  color: #444444;
+}
+
+td.bar-cell {
+  width: 100%;
+}
+
+.bar-track {
+  height: 1.15em;
+  background: #eeeeee;
+  border: 1px solid #cccccc;
+}
+
+.bar-fill {
+  height: 100%;
+  background: #999999;
+}
+
+.bar-fill.good {
+  background: #0a7d34;
+}
+
+.bar-fill.bad {
+  background: #c0392b;
+}
+
+td.bar-value {
+  white-space: nowrap;
+  padding-left: 1em;
+  font-family: ui-monospace, "Courier New", monospace;
+  font-size: 0.9em;
+}
+
+/* real bx-snap screenshots, clipped to their content */
+figure {
+  margin: 1.5em 0;
+}
+
+.shot {
+  height: 150px;
+  overflow: hidden;
+  border: 1px solid #999999;
+}
+
+.shot img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+figcaption {
+  margin-top: 0.45em;
+  color: #777777;
+  font-size: 0.88em;
 }
