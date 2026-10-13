@@ -87,7 +87,7 @@ interface Performed {
 
 // Adaptive settle (S1): quiet window and default cap.
 const QUIET_MS = 50;
-const SETTLE_CAP_MS = 1500;
+const SETTLE_CAP_MS = 1000;
 const MODIFIER_KEYS = new Set(["Shift", "Control", "Alt", "Meta"]);
 // The page's document was replaced (navigation) under an evaluate.
 const CONTEXT_GONE = /Execution context was destroyed|Cannot find context/;
@@ -105,7 +105,11 @@ function normalizeUrl(url: string): string {
   }
 }
 
-/** In-page: resolves once no DOM mutation has happened for `quietMs`. */
+/**
+ * In-page: resolves once no DOM mutation has happened for `quietMs`. Only
+ * attributes that change what a user sees or can do count: an animation
+ * rewriting `style` every frame would otherwise hold every action to the cap.
+ */
 function domQuiet(o: { quietMs: number; capMs: number }): Promise<{ quiet: boolean; title: string }> {
   return new Promise((resolve) => {
     const root = document.documentElement ?? document;
@@ -120,7 +124,25 @@ function domQuiet(o: { quietMs: number; capMs: number }): Promise<{ quiet: boole
       clearTimeout(timer);
       timer = setTimeout(finish, o.quietMs, true);
     });
-    observer.observe(root, { subtree: true, childList: true, attributes: true, characterData: true });
+    observer.observe(root, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+      attributeFilter: [
+        "class",
+        "hidden",
+        "open",
+        "disabled",
+        "aria-expanded",
+        "aria-hidden",
+        "aria-selected",
+        "aria-checked",
+        "aria-pressed",
+        "aria-busy",
+        "aria-disabled",
+        "aria-modal",
+      ],
+    });
     timer = setTimeout(finish, o.quietMs, true);
     const cap = setTimeout(finish, o.capMs, false);
   });
