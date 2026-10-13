@@ -198,6 +198,23 @@ function noOption(want: string, stable: string, labels: string[]): { code: "targ
   };
 }
 
+/** Pixel size of a PNG or JPEG, read from its header. */
+function imageSize(buf: Buffer): { width: number; height: number } {
+  if (buf.length > 24 && buf.readUInt32BE(0) === 0x89504e47) {
+    return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+  }
+  // JPEG: walk the segments to the frame header (SOF0..SOF15 bar DHT/JPG/DAC).
+  let i = 2;
+  while (i + 9 < buf.length && buf[i] === 0xff) {
+    const marker = buf[i + 1] ?? 0;
+    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+      return { width: buf.readUInt16BE(i + 7), height: buf.readUInt16BE(i + 5) };
+    }
+    i += 2 + buf.readUInt16BE(i + 2);
+  }
+  return { width: 0, height: 0 };
+}
+
 /** fetch/XHR requests a page starts while an action runs. */
 interface RequestWatch {
   inFlight(): number;
@@ -348,6 +365,8 @@ export class Session {
   private readonly startedAt = Date.now();
   /** Opened on the first /debug read of a page, never by ordinary commands. */
   private readonly metricSessions = new WeakMap<Page, Promise<CDPSession>>();
+  /** Snapshot capture sessions (S4), separate from /debug's metric sessions. */
+  private readonly snapSessions = new WeakMap<Page, Promise<CDPSession>>();
 
   constructor(opts: SessionOptions) {
     this.profile = opts.profile;
@@ -1115,47 +1134,86 @@ export class Session {
 
   async snap(cmd: CmdOf<"snap">): Promise<SnapResult> {
     const page = await this.pageFor(cmd.tab);
-    step("screenshot");
-    const original = await page.screenshot({ fullPage: cmd.full === true });
-    const viewport = page.viewportSize();
+    return this.capture(page, cmd);
+  }
 
-    let bytes = original;
-    let width = viewport?.width ?? 0;
-    let height = viewport?.height ?? 0;
+  /**
+   * One CDP Page.captureScreenshot (S4): the clip picks the area (viewport,
+   * full page or the target's box) and its scale applies the output width
+   * rule, so nothing is decoded or re-encoded in the page. `stable` repeats
+   * the capture until two in a row are byte-equal.
+   */
+  private async capture(page: Page, opts: Omit<CmdOf<"snap">, "cmd" | "tab">): Promise<SnapResult> {
+    step("measure");
+    let cdp = await this.cdpFor(page);
+    let metrics;
     try {
-      const scaled = await page.evaluate(
-        async (input: { b64: string; maxWidth: number }) => {
-          const blob = await (await fetch(`data:image/png;base64,${input.b64}`)).blob();
-          const bitmap = await createImageBitmap(blob);
-          if (bitmap.width <= input.maxWidth) {
-            return { b64: null, width: bitmap.width, height: bitmap.height };
-          }
-          const scale = input.maxWidth / bitmap.width;
-          const w = Math.round(bitmap.width * scale);
-          const h = Math.round(bitmap.height * scale);
-          const canvas = new OffscreenCanvas(w, h);
-          const ctx = canvas.getContext("2d");
-          if (!ctx) return { b64: null, width: bitmap.width, height: bitmap.height };
-          ctx.drawImage(bitmap, 0, 0, w, h);
-          const out = await canvas.convertToBlob({ type: "image/png" });
-          const buf = new Uint8Array(await out.arrayBuffer());
-          let binary = "";
-          for (let i = 0; i < buf.length; i++) binary += String.fromCharCode(buf[i] ?? 0);
-          return { b64: btoa(binary), width: w, height: h };
-        },
-        { b64: original.toString("base64"), maxWidth: BUDGET.SNAP_MAX_WIDTH },
-      );
-      width = scaled.width;
-      height = scaled.height;
-      if (scaled.b64 !== null) bytes = Buffer.from(scaled.b64, "base64");
+      metrics = await cdp.send("Page.getLayoutMetrics");
     } catch {
-      // no OffscreenCanvas (or the page blocks data: fetches) — ship full size
+      // The cached session died (renderer swap, crash); open a fresh one.
+      this.snapSessions.delete(page);
+      cdp = await this.cdpFor(page);
+      metrics = await cdp.send("Page.getLayoutMetrics");
+    }
+    const view = metrics.cssVisualViewport;
+    let clip: { x: number; y: number; width: number; height: number };
+    let beyond = false;
+    if (opts.target) {
+      const { locator, stable } = await this.resolveTarget(page, opts.target);
+      const box = await locator.boundingBox({ timeout: BUDGET.DEFAULT_TIMEOUT_MS });
+      if (!box || box.width < 1 || box.height < 1) {
+        throw { code: "target_not_found", message: `"${stable}" has no layout box — is it visible?` };
+      }
+      clip = { x: box.x + view.pageX, y: box.y + view.pageY, width: box.width, height: box.height };
+      beyond = true;
+    } else if (opts.full === true) {
+      const size = metrics.cssContentSize;
+      clip = { x: 0, y: 0, width: size.width, height: size.height };
+      beyond = true;
+    } else {
+      clip = { x: view.pageX, y: view.pageY, width: view.clientWidth, height: view.clientHeight };
+    }
+    const scale = Math.min(1, BUDGET.SNAP_MAX_WIDTH / clip.width);
+    const format: "jpeg" | "png" = opts.jpeg === true ? "jpeg" : "png";
+    const params = {
+      format,
+      ...(format === "jpeg" ? { quality: opts.quality ?? 80 } : {}),
+      clip: { ...clip, scale },
+      captureBeyondViewport: beyond,
+    };
+
+    step("screenshot");
+    let data = (await cdp.send("Page.captureScreenshot", params)).data;
+    if (opts.stable === true) {
+      step("wait for a stable frame");
+      const until = Date.now() + 3000;
+      while (Date.now() < until) {
+        await sleep(100);
+        const next = (await cdp.send("Page.captureScreenshot", params)).data;
+        if (next === data) break;
+        data = next;
+      }
     }
 
-    const target = cmd.path ?? path.join(this.snapsDir, `${stamp(new Date())}.png`);
-    await mkdir(path.dirname(target), { recursive: true });
-    await writeFile(target, bytes);
-    return { path: target, width, height, bytes: bytes.length };
+    const bytes = Buffer.from(data, "base64");
+    const size = imageSize(bytes);
+    const ext = format === "jpeg" ? "jpg" : "png";
+    const file = opts.path ?? path.join(this.snapsDir, `${stamp(new Date())}.${ext}`);
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, bytes);
+    return { path: file, width: size.width, height: size.height, bytes: bytes.length, format };
+  }
+
+  /** One CDP session per page for snapshots, opened on first use. */
+  private cdpFor(page: Page): Promise<CDPSession> {
+    const known = this.snapSessions.get(page);
+    if (known) return known;
+    const context = this.context;
+    if (!context) return Promise.reject({ code: "no_page", message: "the browser is not running" });
+    const opened = context.newCDPSession(page);
+    opened.catch(() => this.snapSessions.delete(page));
+    this.snapSessions.set(page, opened);
+    return opened;
   }
 
   async text(cmd: CmdOf<"text">): Promise<TextResult> {
