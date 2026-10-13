@@ -217,18 +217,18 @@ All optional fields; the full text is in `G:\code\bx\src\protocol.ts` once lande
 
 ## Ledger (lead, updated 2026-10-12)
 
-Board: down · Last pushed: b3dc301 · Gate: running on 2e42e9d (scratchpad/gate-<sha>)
+Board: down · Last pushed: 2e42e9d (gate 94/94, 2026-10-12) · bx-live refreshed from 2e42e9d
 
 | Agent | Model | Owns | Item now | Last sha / artifact | Status |
 | --- | --- | --- | --- | --- | --- |
 | scout | opus-xhigh | research report | Q1–Q3 | — | running |
 | core | opus-high | session.ts, daemon.ts, serialize.ts | queue empty; on call for gate failures | …A2 09e65cb C6 1927fc5 G3 41a17a0 C1-wire 5544ca1 (passed) | idle |
 | resolver | opus-high | resolve.ts, distill.ts, tests/resolve.test.ts | all done: C1 C2 C3 C3b C8 S5, C1-fix, LEGACY delete | 4739d97 80d6267 de96220 (passed) | stopped |
-| agentkit | opus-high | src/agent/**, src/bench/** | waits on lead sha for full run | 483656a b8f4ade 132f915 (passed) | idle |
+| agentkit | opus-high | src/agent/**, src/bench/** | G2 full run on 2e42e9d (cap $3) → G6 numbers | 483656a b8f4ade 132f915 (passed) | running |
 | infra | opus-high | observe, debug, record, actionLog, orphans, maintenance, flows | all done: O1 O1b O5 D1 D3 D4 F1 F2 F3 R2 R2b | …d66e5a7 aa00266 e7338f8 (passed) | stopped |
 | lead | — | cli, client, protocol, constants, script | doctor/gc wired; agentkit + infra handoffs | 98a40d2 | next: resolver wiring forward, gate |
 
-Live tool: global bx → G:/code/bx-live (a80f037), relinked by Sal 2026-10-12.
+Live tool: global bx → G:/code/bx-live, refreshed from gated 2e42e9d.
 Background jobs: none
 Waiting on Sal: nothing. Sample approved 2026-10-12; leftover profiles go to `bx gc` (Sal: lead's call). Protocol phase 2 at 7b0db6f.
 Next: review core's sample, then spawn resolver, agentkit, infra
