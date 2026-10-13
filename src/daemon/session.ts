@@ -272,14 +272,13 @@ export class Session {
   relaunches = 0;
   /** Tab ids below this belonged to a browser that died. */
   private lostBelow = 0;
-  private activeIndex = 0;
   /**
-   * Non-zero while a background `tabNew` is creating its page, so the context's
-   * "page" handler leaves activeIndex alone. Without this, an agent opening its
-   * own pinned tab would redirect the operator's unpinned commands into it.
-   * Pages the site itself opens (window.open) still activate.
+   * Where unpinned commands go, held by identity (O2): opening or closing
+   * other tabs never shifts it. A new page takes it only when the active page
+   * opened it (see onNewPage); null means "fall back to the newest page".
    */
-  private suppressActivate = 0;
+  private active: Page | null = null;
+  private readonly openers = new WeakMap<Page, Page>();
   private nextPageId = 1;
   private readonly pageIds = new WeakMap<Page, number>();
   private readonly refs = new Map<number, PageRefs>();
@@ -311,8 +310,17 @@ export class Session {
 
   /** The active page's tab id without touching the page (log lines). */
   get activeTabId(): number | undefined {
-    const page = this.context?.pages()[this.activeIndex];
+    const page = this.activePage();
     return page ? this.pageId(page) : undefined;
+  }
+
+  /** The active page, re-picked (newest page) when it closed or never was. */
+  private activePage(): Page | undefined {
+    const pages = this.context?.pages() ?? [];
+    if (this.active && !this.active.isClosed() && pages.includes(this.active)) return this.active;
+    const fallback = pages[pages.length - 1];
+    this.active = fallback ?? null;
+    return fallback;
   }
 
   // -------------------------------------------------------------------------
@@ -354,7 +362,7 @@ export class Session {
         if (context.pages().length === 0) await context.newPage();
         this.dead = false;
         this.lostBelow = lostBelow;
-        this.activeIndex = 0;
+        this.active = null;
         this.refs.clear();
         this.relaunches++;
         console.log(`[${new Date().toISOString()}] browser relaunched after it closed (${this.relaunches} so far)`);
@@ -393,7 +401,7 @@ export class Session {
     }
     this.context = context;
     for (const page of context.pages()) this.track(page);
-    context.on("page", (page) => this.onNewPage(context, page));
+    context.on("page", (page) => this.onNewPage(page));
     // Deliberate closes (recording relaunch, shutdown) drop this.context
     // first, so only an unexpected close gets past the check.
     context.on("close", () => {
@@ -427,10 +435,24 @@ export class Session {
     if (!alive && this.context === context) this.markDead("a command found it closed");
   }
 
-  private onNewPage(context: BrowserContext, page: Page): void {
+  /**
+   * A popup or tab the active page opened becomes active, as it would for a
+   * person clicking. Anything else stays in the background: a tab opened by a
+   * command pinned to another tab, a `tabNew --background`, or a noopener
+   * link (no opener to check). Actions report new tabs either way.
+   */
+  private onNewPage(page: Page): void {
     this.track(page);
-    if (this.suppressActivate > 0) return;
-    this.activeIndex = Math.max(0, context.pages().length - 1);
+    // Read before activePage() could fall back to this very page.
+    const activeNow = this.active && !this.active.isClosed() ? this.active : null;
+    page.opener().then(
+      (opener) => {
+        if (!opener) return;
+        this.openers.set(page, opener);
+        if (opener === activeNow && this.active === activeNow && !page.isClosed()) this.active = page;
+      },
+      () => undefined,
+    );
   }
 
   private track(page: Page): void {
@@ -443,20 +465,18 @@ export class Session {
     page.on("close", () => {
       this.refs.delete(id);
       this.titles.delete(id);
-      const count = this.context?.pages().length ?? 0;
-      if (this.activeIndex >= count) this.activeIndex = Math.max(0, count - 1);
+      // A closed popup hands the active slot back to the page that opened it.
+      if (this.active === page) {
+        const opener = this.openers.get(page);
+        this.active = opener && !opener.isClosed() ? opener : null;
+      }
     });
   }
 
   private async ensurePage(): Promise<Page> {
     const context = await this.ensureContext();
-    let pages = context.pages();
-    if (pages.length === 0) {
-      await context.newPage();
-      pages = context.pages();
-    }
-    if (this.activeIndex >= pages.length) this.activeIndex = pages.length - 1;
-    const page = pages[this.activeIndex];
+    if (context.pages().length === 0) await context.newPage();
+    const page = this.activePage();
     if (!page) throw { code: "no_page", message: "no page available" };
     return page;
   }
@@ -531,7 +551,7 @@ export class Session {
       id,
       url: page.url(),
       title: this.titles.get(id) ?? "",
-      active: index === this.activeIndex,
+      active: page === this.activePage(),
     };
   }
 
@@ -1283,23 +1303,16 @@ export class Session {
    * pinned tab this way; a foreground tab is a human asking for a new tab.
    */
   private async newPage(context: BrowserContext, background: boolean): Promise<Page> {
+    const stay = this.activePage();
+    // newPage() pages have no opener, so onNewPage never activates them.
+    const page = await context.newPage();
     if (!background) {
-      const page = await context.newPage();
-      this.activeIndex = Math.max(0, context.pages().indexOf(page));
+      this.active = page;
       return page;
-    }
-    const stay = context.pages()[this.activeIndex];
-    this.suppressActivate++;
-    let page: Page;
-    try {
-      page = await context.newPage();
-    } finally {
-      this.suppressActivate--;
     }
     // Chrome foregrounds a freshly opened tab regardless of what we track.
     if (stay && !stay.isClosed()) await stay.bringToFront().catch(() => undefined);
-    this.activeIndex = context.pages().indexOf(stay ?? page);
-    if (this.activeIndex < 0) this.activeIndex = 0;
+    this.active = stay ?? page;
     return page;
   }
 
@@ -1327,7 +1340,7 @@ export class Session {
     const context = await this.ensureContext();
     const page = context.pages()[cmd.index];
     if (!page) throw { code: "bad_request", message: `no tab at index ${cmd.index}` };
-    this.activeIndex = cmd.index;
+    this.active = page;
     await page.bringToFront().catch(() => undefined);
     this.appendAction(cmd, `selected tab ${cmd.index}`, undefined, this.pageId(page));
     return this.tabs();
@@ -1341,7 +1354,7 @@ export class Session {
     // (and the daemon) survives instead of the browser closing under us.
     if (cmd.scope !== undefined) {
       const pages = context.pages();
-      const keep = cmd.scope === "others" ? (pages[this.activeIndex] ?? pages[0]) : undefined;
+      const keep = cmd.scope === "others" ? (this.activePage() ?? pages[0]) : undefined;
       let closed = 0;
       for (const page of [...pages]) {
         if (page === keep) continue;
@@ -1349,7 +1362,7 @@ export class Session {
         closed++;
       }
       if (context.pages().length === 0) await context.newPage();
-      this.activeIndex = keep ? Math.max(0, context.pages().indexOf(keep)) : 0;
+      this.active = keep ?? context.pages()[0] ?? null;
       const what =
         cmd.scope === "others"
           ? `closed ${closed} other tab${closed === 1 ? "" : "s"}`
@@ -1359,17 +1372,10 @@ export class Session {
     }
 
     const page = await this.pageFor(cmd.tab);
-    const before = context.pages();
-    const closed = before.indexOf(page);
-    const stay = before[this.activeIndex];
+    const closed = context.pages().indexOf(page);
+    // Closing another tab leaves the active page alone (it is held by
+    // identity); closing the active one falls back via the close handler.
     await page.close();
-    // Closing any other tab shifts the indexes around the active page but must
-    // not change which page is active — so re-find it by identity rather than
-    // patching the index (the page's own close handler already clamped it).
-    const after = context.pages();
-    const kept = stay && stay !== page ? after.indexOf(stay) : -1;
-    if (kept >= 0) this.activeIndex = kept;
-    else this.activeIndex = Math.max(0, Math.min(this.activeIndex, after.length - 1));
     this.appendAction(cmd, `closed tab ${closed}`, undefined, this.pageId(page));
     return this.tabs();
   }
@@ -1495,8 +1501,7 @@ export class Session {
    */
   async relaunch(extra?: RelaunchOptions): Promise<void> {
     const previous = this.context;
-    const urls = previous ? previous.pages().map((page) => page.url()) : [];
-    const activeUrl = urls[this.activeIndex] ?? urls[0];
+    const activeUrl = previous ? this.activePage()?.url() : undefined;
 
     this.context = null;
     if (previous) await previous.close().catch(() => undefined);
@@ -1515,7 +1520,7 @@ export class Session {
         .goto(activeUrl, { waitUntil: "domcontentloaded", timeout: 15000 })
         .catch(() => undefined);
     }
-    this.activeIndex = 0;
+    this.active = page;
     // Refs registered against the old context cannot resolve in the new one,
     // and its page ids are gone with it.
     this.refs.clear();
