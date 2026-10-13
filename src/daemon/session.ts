@@ -12,6 +12,7 @@ import {
   SNAPS_DIR,
   type ActionLogEntry,
   type ActionLogResult,
+  type ActionDelta,
   type ActionResult,
   type Cmd,
   type ConsoleEntry,
@@ -53,6 +54,18 @@ import { recordingSlug } from "./record.ts";
 import type { BrowserContext, CDPSession, Locator, Page, Request } from "playwright-core";
 
 type CmdOf<K extends Cmd["cmd"]> = Extract<Cmd, { cmd: K }>;
+type ActionThen = NonNullable<CmdOf<"click">["then"]>;
+
+/** An action command's `then`, `until` and timeout (A2); none for the rest. */
+function actionExtras(cmd: Cmd | null): { then?: ActionThen; until?: string; timeoutMs?: number } {
+  // Parsed commands omit absent keys, so each is looked up on its own.
+  if (cmd === null) return {};
+  return {
+    then: "then" in cmd ? cmd.then : undefined,
+    until: "until" in cmd ? cmd.until : undefined,
+    timeoutMs: "timeoutMs" in cmd ? cmd.timeoutMs : undefined,
+  };
+}
 
 interface Resolved {
   locator: Locator;
@@ -108,12 +121,177 @@ function normalizeUrl(url: string): string {
   }
 }
 
+// A2: what an action changed. New text in a live region is an alert; an open
+// <dialog> or a visible aria-modal is a dialog.
+const DELTA_SPEC: DeltaSpec = {
+  live: '[role="alert"], [role="status"], [aria-live]:not([aria-live="off"])',
+  modal: 'dialog[open], [aria-modal="true"]',
+  textMax: 200,
+};
+const DELTA_ALERTS_MAX = 3;
+
+interface DeltaSpec {
+  live: string;
+  modal: string;
+  textMax: number;
+}
+
+/** deltaStart's snapshot of the page before the action. */
+interface DeltaBefore {
+  dialog: boolean;
+  live: string[];
+}
+
+/** The page after the action, read in settle's last evaluate. */
+interface DeltaRead {
+  /** Still deltaStart's document, so its observer saw every mutation. */
+  same: boolean;
+  added: number;
+  removed: number;
+  dialog: boolean;
+  /** Live-region text seen during the action (same document) or present now (new one). */
+  alerts: string[];
+  focused: string | null;
+}
+
+/** In-page state from deltaStart to the read, kept on window.__bxDelta. */
+interface DeltaState {
+  observer: MutationObserver;
+  added: number;
+  removed: number;
+  seen: Set<string>;
+  hosts: Set<Element>;
+}
+
+/**
+ * In-page, before the action: counts element nodes added and removed, and
+ * notes the text of every live region the action touches as it happens, so a
+ * toast that comes and goes inside the settle is still reported.
+ */
+function deltaStart(spec: DeltaSpec): DeltaBefore {
+  const prior: unknown = Reflect.get(window, "__bxDelta");
+  if (typeof prior === "object" && prior !== null && "observer" in prior && prior.observer instanceof MutationObserver) {
+    prior.observer.disconnect();
+  }
+  const text = (el: Element): string =>
+    el instanceof HTMLElement && el.checkVisibility() ? el.innerText.trim().replace(/\s+/g, " ").slice(0, spec.textMax) : "";
+  const size = (n: Node): number => (n instanceof Element ? 1 + n.getElementsByTagName("*").length : 0);
+  const seen = new Set<string>();
+  const hosts = new Set<Element>();
+  let added = 0;
+  let removed = 0;
+  const observer = new MutationObserver((records) => {
+    const touched = new Set<Element>();
+    for (const r of records) {
+      for (const n of r.addedNodes) {
+        added += size(n);
+        if (!(n instanceof Element)) continue;
+        if (n.matches(spec.live)) touched.add(n);
+        for (const h of n.querySelectorAll(spec.live)) touched.add(h);
+      }
+      for (const n of r.removedNodes) removed += size(n);
+      const host = (r.target instanceof Element ? r.target : r.target.parentElement)?.closest(spec.live);
+      if (host) touched.add(host);
+    }
+    for (const h of touched) {
+      hosts.add(h);
+      const t = text(h);
+      if (t) seen.add(t);
+    }
+    state.added = added;
+    state.removed = removed;
+  });
+  const state: DeltaState = { observer, added, removed, seen, hosts };
+  observer.observe(document.documentElement ?? document, { subtree: true, childList: true, characterData: true });
+  Object.defineProperty(window, "__bxDelta", { value: state, configurable: true, enumerable: false, writable: true });
+  // Nothing reads it after a minute; don't leave it observing forever.
+  setTimeout(() => observer.disconnect(), 60_000);
+  return {
+    dialog: Array.from(document.querySelectorAll(spec.modal)).some((el) => el.checkVisibility()),
+    live: Array.from(document.querySelectorAll(spec.live), text).filter((t) => t.length > 0),
+  };
+}
+
 /**
  * In-page: resolves once no DOM mutation has happened for `quietMs`. Only
  * attributes that change what a user sees or can do count: an animation
  * rewriting `style` every frame would otherwise hold every action to the cap.
+ * With `delta`, the result also carries what the action changed (A2), so the
+ * after-read costs no extra evaluate.
  */
-function domQuiet(o: { quietMs: number; capMs: number }): Promise<{ quiet: boolean; title: string }> {
+function domQuiet(o: {
+  quietMs: number;
+  capMs: number;
+  delta: DeltaSpec | null;
+}): Promise<{ quiet: boolean; title: string; read: DeltaRead | null }> {
+  const readDelta = (spec: DeltaSpec): DeltaRead => {
+    const text = (el: Element): string =>
+      el instanceof HTMLElement && el.checkVisibility() ? el.innerText.trim().replace(/\s+/g, " ").slice(0, spec.textMax) : "";
+    const isState = (v: unknown): v is DeltaState =>
+      typeof v === "object" && v !== null && "observer" in v && v.observer instanceof MutationObserver;
+    const state: unknown = Reflect.get(window, "__bxDelta");
+    const alerts: string[] = [];
+    if (isState(state)) {
+      // Final text first ("Saved"), then what showed on the way ("Saving…").
+      for (const h of state.hosts) if (h.isConnected) alerts.push(text(h));
+      alerts.push(...state.seen);
+    } else {
+      for (const h of document.querySelectorAll(spec.live)) alerts.push(text(h));
+    }
+    return {
+      same: isState(state),
+      added: isState(state) ? state.added : 0,
+      removed: isState(state) ? state.removed : 0,
+      dialog: Array.from(document.querySelectorAll(spec.modal)).some((el) => el.checkVisibility()),
+      alerts: alerts.filter((t) => t.length > 0),
+      focused: focusedName(),
+    };
+  };
+  // `role "name"` of the focused element; null when nothing is (body).
+  const focusedName = (): string | null => {
+    const el = document.activeElement;
+    if (!el || el === document.body || el === document.documentElement) return null;
+    const inputRoles: Record<string, string> = {
+      checkbox: "checkbox",
+      radio: "radio",
+      button: "button",
+      submit: "button",
+      reset: "button",
+      image: "button",
+      range: "slider",
+      search: "searchbox",
+      number: "spinbutton",
+    };
+    const tag = el.tagName.toLowerCase();
+    const implicit =
+      el instanceof HTMLInputElement
+        ? (inputRoles[el.type] ?? "textbox")
+        : tag === "textarea"
+          ? "textbox"
+          : tag === "select"
+            ? "combobox"
+            : tag === "a" && el.hasAttribute("href")
+              ? "link"
+              : tag;
+    const role = el.getAttribute("role") || implicit;
+    const labelledBy = (el.getAttribute("aria-labelledby") ?? "")
+      .split(/\s+/)
+      .map((id) => (id ? (document.getElementById(id)?.textContent ?? "") : ""))
+      .join(" ");
+    const labels =
+      el instanceof HTMLInputElement ||
+      el instanceof HTMLTextAreaElement ||
+      el instanceof HTMLSelectElement ||
+      el instanceof HTMLButtonElement
+        ? Array.from(el.labels ?? [], (l) => l.textContent ?? "").join(" ")
+        : "";
+    const own = el instanceof HTMLElement && !(el instanceof HTMLInputElement) && tag !== "textarea" ? el.innerText : "";
+    const name =
+      [el.getAttribute("aria-label"), labelledBy, labels, el.getAttribute("placeholder"), el.getAttribute("title"), own]
+        .map((s) => (s ?? "").trim().replace(/\s+/g, " "))
+        .find((s) => s.length > 0) ?? "";
+    return name ? `${role} "${name.slice(0, 60)}"` : role;
+  };
   return new Promise((resolve) => {
     const root = document.documentElement ?? document;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -121,7 +299,7 @@ function domQuiet(o: { quietMs: number; capMs: number }): Promise<{ quiet: boole
       observer.disconnect();
       clearTimeout(timer);
       clearTimeout(cap);
-      resolve({ quiet, title: document.title });
+      resolve({ quiet, title: document.title, read: o.delta ? readDelta(o.delta) : null });
     };
     const observer = new MutationObserver(() => {
       clearTimeout(timer);
@@ -374,6 +552,8 @@ export class Session {
    */
   private active: Page | null = null;
   private readonly openers = new WeakMap<Page, Page>();
+  /** onNewPage's opener check per page; an action awaits it before reporting newTab. */
+  private readonly activation = new WeakMap<Page, Promise<void>>();
   private nextPageId = 1;
   private readonly pageIds = new WeakMap<Page, number>();
   private readonly refs = new Map<number, PageRefs>();
@@ -544,7 +724,7 @@ export class Session {
     this.track(page);
     // Read before activePage() could fall back to this very page.
     const activeNow = this.active && !this.active.isClosed() ? this.active : null;
-    page.opener().then(
+    const settled = page.opener().then(
       (opener) => {
         if (!opener) return;
         this.openers.set(page, opener);
@@ -552,6 +732,7 @@ export class Session {
       },
       () => undefined,
     );
+    this.activation.set(page, settled);
   }
 
   private track(page: Page): void {
@@ -713,65 +894,165 @@ export class Session {
     settleCap = SETTLE_CAP_MS,
   ): Promise<ActionResult> {
     const page = await this.pageFor(tab);
+    const id = this.pageId(page);
     const urlBefore = page.url();
+    const titleBefore = this.titles.get(id) ?? "";
     const mark = markConsole(this.buffers.console);
     // Counted from before the action: only requests it caused hold the settle.
     const requests = watchRequests(page);
+    // A2: an action that settles reports what it changed. The before-snapshot
+    // is the one extra evaluate; the after-read rides on settle's last one.
+    const spec = settleCap > 0 ? DELTA_SPEC : null;
+    const before = spec ? await page.evaluate(deltaStart, spec).catch(() => null) : null;
+    const created: Page[] = [];
+    const onPage = (p: Page): void => {
+      created.push(p);
+    };
+    const context = page.context();
+    context.on("page", onPage);
     let settledMs = 0;
+    let read: DeltaRead | null = null;
     let performed: Performed;
     try {
       performed = await perform(page);
-      if (settleCap > 0) settledMs = await this.settle(page, settleCap, requests);
+      if (settleCap > 0) ({ ms: settledMs, read } = await this.settle(page, settleCap, requests, spec));
     } finally {
       requests.stop();
+      context.off("page", onPage);
     }
     const { text, stableTarget, secret } = performed;
+    // The log outlives the command: a password must not reach cmdJson.
+    if (cmd) {
+      const logged = secret === true && cmd.cmd === "fill" ? { ...cmd, value: REDACTED_MARK } : cmd;
+      this.appendAction(logged, text, stableTarget, id);
+    }
+    const extras = actionExtras(cmd);
+    if (cmd && extras.until !== undefined) {
+      // The action already ran (and is logged); this only decides the outcome.
+      const until = extras.until;
+      step(`wait for "${until}"`);
+      await page
+        .getByText(until)
+        .first()
+        .waitFor({ state: "visible", timeout: extras.timeoutMs ?? BUDGET.DEFAULT_TIMEOUT_MS })
+        .catch(() => {
+          throw { code: "timeout", message: `"${until}" never appeared after ${cmd.cmd}` };
+        });
+      if (spec) read = (await this.readDelta(page, spec)) ?? read;
+    }
     const navigated = urlBefore !== page.url();
     if (navigated) this.refsFor(page).generation++;
     const result: ActionResult = {
       page: this.pageInfo(page),
       navigated,
-      consoleErrors: newErrorsSince(this.buffers.console, mark, this.pageId(page)).slice(0, 5),
+      consoleErrors: newErrorsSince(this.buffers.console, mark, id).slice(0, 5),
       settledMs,
     };
-    // The log outlives the command: a password must not reach cmdJson.
-    if (cmd) {
-      const logged = secret === true && cmd.cmd === "fill" ? { ...cmd, value: REDACTED_MARK } : cmd;
-      this.appendAction(logged, text, stableTarget, this.pageId(page));
-    }
+    if (spec) result.delta = await this.delta(page, { urlBefore, titleBefore, before, read, created });
+    if (extras.then !== undefined) result.then = await this.observeAfter(page, extras.then);
     return result;
+  }
+
+  /** ActionDelta from the before-snapshot, the after-read and the pages the action opened. */
+  private async delta(
+    page: Page,
+    o: { urlBefore: string; titleBefore: string; before: DeltaBefore | null; read: DeltaRead | null; created: Page[] },
+  ): Promise<ActionDelta> {
+    const { before, read } = o;
+    // A replaced document has no counts: its observer went with the old one.
+    const delta: ActionDelta = { added: read?.same ? read.added : 0, removed: read?.same ? read.removed : 0 };
+    const url = page.url();
+    if (url !== o.urlBefore) delta.url = url;
+    const title = this.titles.get(this.pageId(page)) ?? "";
+    if (title !== o.titleBefore) delta.title = title;
+    if (read) {
+      if (read.dialog !== (before?.dialog ?? false)) delta.dialog = read.dialog ? "opened" : "closed";
+      const old = new Set(before?.live ?? []);
+      const alerts = [...new Set(read.alerts)].filter((t) => !old.has(t)).slice(0, DELTA_ALERTS_MAX);
+      if (alerts.length > 0) delta.alerts = alerts;
+      if (read.focused !== null) delta.focused = read.focused;
+    }
+    for (const opened of o.created) {
+      if (opened.isClosed()) continue;
+      // Settles whether O2 made it active, so PageInfo.active is right.
+      await this.activation.get(opened);
+      const opener = await opened.opener().catch(() => null);
+      // A noopener tab has no opener; any tab opened by another page is not ours.
+      if (opener !== null && opener !== page) continue;
+      delta.newTab = this.pageInfo(opened);
+      break;
+    }
+    return delta;
+  }
+
+  /** The after-read alone, for when settle's last evaluate is stale. */
+  private async readDelta(page: Page, spec: DeltaSpec): Promise<DeltaRead | null> {
+    try {
+      return (await page.evaluate(domQuiet, { quietMs: 0, capMs: 0, delta: spec })).read;
+    } catch {
+      return null;
+    }
+  }
+
+  /** An action's `then`: one observation of the settled page, in the same result. */
+  private async observeAfter(page: Page, what: ActionThen): Promise<NonNullable<ActionResult["then"]>> {
+    if (what === "els") {
+      step("scan");
+      const scan = await this.scan(page);
+      return { els: { generation: this.refsFor(page).generation, ...renderEls(scan, {}) } };
+    }
+    if (what === "text") return { text: await this.readText(page, {}) };
+    return { snap: await this.capture(page, {}) };
   }
 
   /**
    * Waits until the DOM has been quiet for QUIET_MS and none of the action's
    * fetch/XHR requests is in flight, capped at `capMs`. Returns the time
-   * spent. A navigation mid-wait restarts the DOM check on the new document.
+   * spent, and with `delta` the after-read of the last evaluate (re-read when
+   * a wait followed it). A navigation mid-wait restarts the DOM check on the
+   * new document.
    */
-  private async settle(page: Page, capMs: number, requests: RequestWatch): Promise<number> {
+  private async settle(
+    page: Page,
+    capMs: number,
+    requests: RequestWatch,
+    delta: DeltaSpec | null,
+  ): Promise<{ ms: number; read: DeltaRead | null }> {
     step("settle");
     const started = Date.now();
     const left = (): number => capMs - (Date.now() - started);
+    let read: DeltaRead | null = null;
+    let fresh = false;
     while (left() > 0) {
       let quiet: boolean;
       try {
-        const r = await page.evaluate(domQuiet, { quietMs: QUIET_MS, capMs: left() });
+        const r = await page.evaluate(domQuiet, { quietMs: QUIET_MS, capMs: left(), delta });
         this.titles.set(this.pageId(page), r.title);
         quiet = r.quiet;
+        read = r.read;
+        fresh = true;
       } catch (err) {
+        fresh = false;
         if (page.isClosed() || !CONTEXT_GONE.test(errorMessage(err))) break;
         await page.waitForLoadState("domcontentloaded", { timeout: Math.max(1, left()) }).catch(() => undefined);
         continue;
       }
       if (!quiet) break;
       if (requests.inFlight() > 0) {
+        fresh = false;
         await requests.drained(left());
         continue;
       }
       // A request that just finished may still be rendering its result.
-      if (Date.now() - requests.lastChange() < QUIET_MS) continue;
+      if (Date.now() - requests.lastChange() < QUIET_MS) {
+        fresh = false;
+        continue;
+      }
       break;
     }
-    return Math.min(capMs, Date.now() - started);
+    const ms = Math.min(capMs, Date.now() - started);
+    if (delta && !fresh && !page.isClosed()) read = (await this.readDelta(page, delta)) ?? read;
+    return { ms, read };
   }
 
   /** Explicit `settle` wins; otherwise `skip` actions don't settle at all. */
@@ -1177,7 +1458,7 @@ export class Session {
       }
       let quiet = false;
       try {
-        quiet = (await page.evaluate(domQuiet, { quietMs: IDLE_MS, capMs: left() })).quiet;
+        quiet = (await page.evaluate(domQuiet, { quietMs: IDLE_MS, capMs: left(), delta: null })).quiet;
       } catch (err) {
         if (!CONTEXT_GONE.test(errorMessage(err))) throw err;
         continue;
@@ -1349,7 +1630,11 @@ export class Session {
 
   async text(cmd: CmdOf<"text">): Promise<TextResult> {
     const page = await this.pageFor(cmd.tab);
-    const locator = cmd.selector ? page.locator(cmd.selector).first() : page.locator("body");
+    return this.readText(page, cmd);
+  }
+
+  private async readText(page: Page, opts: { selector?: string }): Promise<TextResult> {
+    const locator = opts.selector ? page.locator(opts.selector).first() : page.locator("body");
     step("read text");
     const raw = (await locator.innerText({ timeout: BUDGET.DEFAULT_TIMEOUT_MS })).replace(/\n{3,}/g, "\n\n");
     const truncated = raw.length > BUDGET.TEXT_MAX_CHARS;
