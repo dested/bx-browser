@@ -492,7 +492,9 @@ export function formatAction(verb: string, detail: string, r: ActionResult): str
     for (const alert of d.alerts ?? []) lines.push(`! ${alert}`);
     if (d.added > 0 || d.removed > 0) lines.push(`dom +${d.added} −${d.removed}`);
     if (d.focused !== undefined) lines.push(`focus ${d.focused}`);
-    if (d.newTab !== undefined) lines.push(`new tab ${d.newTab.id} (background): ${d.newTab.url}`);
+    if (d.newTab !== undefined) {
+      lines.push(`new tab ${d.newTab.id}${d.newTab.active ? " (now active)" : " (background)"}: ${d.newTab.url}`);
+    }
   }
   const then = r.then;
   if (then?.els) lines.push("", then.els.rendered.trim() || "(no interactive elements)");

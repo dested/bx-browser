@@ -371,7 +371,7 @@ export interface ActionDelta {
   added: number; // element nodes added to the DOM
   removed: number; // element nodes removed
   focused?: string; // the focused element afterwards, as `role "name"`
-  newTab?: PageInfo; // a popup/tab this action opened (it is not made active)
+  newTab?: PageInfo; // a popup/tab this action opened; active when the acting tab was active (O2)
 }
 export interface ActionResult {
   // returned by click/fill/press/select/mouse/drag/key/wheel/back/reload/wait
