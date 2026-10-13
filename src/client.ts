@@ -126,7 +126,7 @@ export async function isAlive(run: RunFile): Promise<boolean> {
 // ---------------------------------------------------------------------------
 
 const START_TIMEOUT_MS = 15_000;
-const START_POLL_MS = 100;
+const START_POLL_MS = 15;
 // The daemon's stdout/stderr log rotates when a new daemon starts on a log
 // past this size: <profile>.log -> <profile>.1.log (one generation kept).
 const LOG_ROTATE_BYTES = 5 * 1024 * 1024;
