@@ -28,7 +28,6 @@ import {
   type NetEntry,
   type OpenResult,
   type PageInfo,
-  type RefEntry,
   type SnapResult,
   type StatusResult,
   type TabsResult,
@@ -36,7 +35,7 @@ import {
   type TextResult,
 } from "../protocol.ts";
 import { ACTION_LOG_CAP, ActionLog } from "./actionLog.ts";
-import { distillPage, renderEls, type DistillResult } from "./distill.ts";
+import { nearMatches, refCount, resolveTarget as resolveIn, scanEls } from "./resolve.ts";
 import { seedOsPasswordCheck } from "./osPassword.ts";
 import { jsFunctionSource, jsProgram } from "./serialize.ts";
 import {
@@ -83,15 +82,6 @@ interface Origin extends Point {
   stable?: string;
 }
 
-/**
- * One page's refs. Scoped per page because concurrent pinned callers each scan
- * their own tab: a single registry would let every els clobber every other
- * caller's refs, and a navigation in one tab would stale refs in all of them.
- */
-interface PageRefs {
-  generation: number;
-  entries: Map<number, RefEntry>;
-}
 
 /** What an action's perform step reports back to runAction. */
 interface Performed {
@@ -669,7 +659,6 @@ export class Session {
   private readonly activation = new WeakMap<Page, Promise<void>>();
   private nextPageId = 1;
   private readonly pageIds = new WeakMap<Page, number>();
-  private readonly refs = new Map<number, PageRefs>();
   /** Per-page title (S6): navigation events and settle() keep it current. */
   private readonly titles = new Map<number, string>();
   /** Capped; record.ts holds it during a recording (see actionLog.ts). */
@@ -751,7 +740,6 @@ export class Session {
         this.dead = false;
         this.lostBelow = lostBelow;
         this.active = null;
-        this.refs.clear();
         this.relaunches++;
         console.log(`[${new Date().toISOString()}] browser relaunched after it closed (${this.relaunches} so far)`);
         return context;
@@ -868,7 +856,6 @@ export class Session {
     });
     page.on("domcontentloaded", () => this.refreshTitle(page));
     page.on("close", () => {
-      this.refs.delete(id);
       this.titles.delete(id);
       // A closed popup hands the active slot back to the page that opened it.
       if (this.active === page) {
@@ -923,15 +910,6 @@ export class Session {
     return id;
   }
 
-  private refsFor(page: Page): PageRefs {
-    const id = this.pageId(page);
-    const known = this.refs.get(id);
-    if (known) return known;
-    const fresh: PageRefs = { generation: 0, entries: new Map<number, RefEntry>() };
-    this.refs.set(id, fresh);
-    return fresh;
-  }
-
   /**
    * Title cache upkeep. Fire-and-forget: on a page stuck in a busy loop the
    * read never answers, and nothing may wait on it.
@@ -958,22 +936,6 @@ export class Session {
       title: this.titles.get(id) ?? "",
       active: page === this.activePage(),
     };
-  }
-
-  /** Fresh scan; bumps this page's generation and rebuilds its ref registry. */
-  private async scan(page: Page): Promise<DistillResult> {
-    const result = await distillPage(page);
-    this.refsFor(page).generation++;
-    this.register(page, result);
-    return result;
-  }
-
-  private register(page: Page, result: DistillResult): void {
-    const refs = this.refsFor(page);
-    refs.entries.clear();
-    for (const entry of result.refEntries) {
-      refs.entries.set(entry.ref, { ...entry, generation: refs.generation });
-    }
   }
 
   private appendAction(cmd: Cmd, text: string, stableTarget?: string, tab?: number): void {
@@ -1046,6 +1008,7 @@ export class Session {
       step(`wait for "${until}"`);
       await page
         .getByText(until)
+        .filter({ visible: true })
         .first()
         .waitFor({ state: "visible", timeout: extras.timeoutMs ?? BUDGET.DEFAULT_TIMEOUT_MS })
         .catch(() => {
@@ -1054,7 +1017,6 @@ export class Session {
       if (spec) read = (await this.readDelta(page, spec)) ?? read;
     }
     const navigated = urlBefore !== page.url();
-    if (navigated) this.refsFor(page).generation++;
     const result: ActionResult = {
       page: this.pageInfo(page),
       navigated,
@@ -1111,8 +1073,7 @@ export class Session {
   private async observeAfter(page: Page, what: ActionThen): Promise<NonNullable<ActionResult["then"]>> {
     if (what === "els") {
       step("scan");
-      const scan = await this.scan(page);
-      return { els: { generation: this.refsFor(page).generation, ...renderEls(scan, {}) } };
+      return { els: await scanEls(page) };
     }
     if (what === "text") return { text: await this.readText(page, {}) };
     return { snap: await this.capture(page, {}) };
@@ -1178,72 +1139,14 @@ export class Session {
   // Target resolution
   // -------------------------------------------------------------------------
 
-  private async firstPresent(candidates: Locator[]): Promise<Locator | null> {
-    for (const candidate of candidates) {
-      const count = await candidate.count().catch(() => 0);
-      if (count > 0) return candidate.first();
-    }
-    return null;
-  }
-
-  private async resolveTarget(page: Page, target: Target): Promise<Resolved> {
+  /**
+   * C1–C3 (resolve.ts): one in-page pass scores every visible candidate, exact
+   * before fuzzy; a tie is `ambiguous`; a ref is the element `els` listed. A
+   * miss polls up to min(timeoutMs ?? 5000, 2000) ms; 0 answers at once.
+   */
+  private async resolveTarget(page: Page, target: Target, timeoutMs?: number): Promise<Resolved> {
     step("resolve target");
-    if ("ref" in target) {
-      const refs = this.refsFor(page);
-      const entry = refs.entries.get(target.ref);
-      if (!entry) {
-        throw { code: "target_not_found", message: `ref ${target.ref} is unknown — run bx els` };
-      }
-      if (entry.generation !== refs.generation) {
-        throw { code: "stale_ref", message: `ref ${target.ref} is stale — re-run bx els` };
-      }
-      const candidates: Locator[] = [];
-      if (entry.testid) candidates.push(page.getByTestId(entry.testid));
-      if (entry.domId) {
-        candidates.push(page.locator(`[id="${entry.domId.replaceAll('"', '\\"')}"]`));
-      }
-      if (entry.role) {
-        // Playwright's AriaRole union is not knowable from a distilled string.
-        const options = entry.role.name ? { name: entry.role.name, exact: false } : {};
-        candidates.push(page.getByRole(entry.role.role as never, options));
-      }
-      candidates.push(page.locator(entry.cssPath));
-      const locator = await this.firstPresent(candidates);
-      if (!locator) {
-        throw { code: "stale_ref", message: `ref ${target.ref} is stale — re-run bx els` };
-      }
-      return { locator, stable: entry.testid ?? entry.role?.name ?? entry.cssPath };
-    }
-
-    if ("selector" in target) {
-      return { locator: page.locator(target.selector).first(), stable: target.selector };
-    }
-    // Interim until resolve.ts lands (phase 2): plain Playwright lookups.
-    if ("testid" in target) return { locator: page.getByTestId(target.testid).first(), stable: target.testid };
-    if ("label" in target) return { locator: page.getByLabel(target.label).first(), stable: target.label };
-    if ("role" in target) {
-      throw { code: "bad_request", message: "role targets need the new resolver (phase 2)" };
-    }
-
-    const text = target.text;
-    const roles = ["button", "link", "tab", "menuitem", "checkbox", "radio"];
-    const candidates: Locator[] = [
-      page.getByTestId(text),
-      ...roles.map((role) => page.getByRole(role as never, { name: text, exact: false })),
-      page.getByLabel(text),
-      page.getByPlaceholder(text),
-      page.getByText(text, { exact: true }),
-      page.getByText(text),
-    ];
-    const locator = await this.firstPresent(candidates);
-    if (!locator) {
-      throw {
-        code: "target_not_found",
-        message: `no element matching "${text}"`,
-        nearMatches: await this.nearMatches(page, text),
-      };
-    }
-    return { locator, stable: text };
+    return resolveIn(page, target, timeoutMs === undefined ? {} : { timeoutMs });
   }
 
   /**
@@ -1261,26 +1164,6 @@ export class Session {
     return { x: box.x, y: box.y, stable };
   }
 
-  /** Re-registers at the current generation so the suggested refs are usable. */
-  private async nearMatches(page: Page, text: string): Promise<El[]> {
-    const words = text
-      .toLowerCase()
-      .split(/\s+/)
-      .filter((w) => w.length > 0);
-    let scan: DistillResult;
-    try {
-      scan = await distillPage(page);
-    } catch {
-      return [];
-    }
-    this.register(page, scan);
-    return scan.els
-      .filter((el) => {
-        const haystack = `${el.name} ${el.testid ?? ""} ${el.id ?? ""}`.toLowerCase();
-        return words.some((w) => haystack.includes(w));
-      })
-      .slice(0, 5);
-  }
 
   // -------------------------------------------------------------------------
   // Commands
@@ -1304,23 +1187,23 @@ export class Session {
     }
     step("wait for redirects");
     await this.urlSettled(page, interrupted);
-    let scan: DistillResult;
+    let els: ElsResult;
     try {
       step("scan");
-      scan = await this.scan(page);
+      els = await scanEls(page);
     } catch (err) {
       // It redirected again after the quiet window; scan the page it landed on.
       if (!CONTEXT_GONE.test(errorMessage(err))) throw err;
       step("wait for redirects");
       await this.urlSettled(page, true);
       step("scan");
-      scan = await this.scan(page);
+      els = await scanEls(page);
     }
     this.appendAction({ cmd: "open", url }, `opened ${url}`, url, this.pageId(page));
     const finalUrl = page.url();
     const result: OpenResult = {
       page: this.pageInfo(page),
-      els: { generation: this.refsFor(page).generation, ...renderEls(scan, {}) },
+      els,
     };
     if (normalizeUrl(finalUrl) !== normalizeUrl(url)) result.redirectedTo = finalUrl;
     return result;
@@ -1353,16 +1236,12 @@ export class Session {
   async els(cmd: CmdOf<"els">): Promise<ElsResult> {
     const page = await this.pageFor(cmd.tab);
     step("scan");
-    const scan = await this.scan(page);
-    return {
-      generation: this.refsFor(page).generation,
-      ...renderEls(scan, { all: cmd.all, filter: cmd.filter }),
-    };
+    return scanEls(page, { all: cmd.all, filter: cmd.filter, diff: cmd.diff, clickables: cmd.clickables });
   }
 
   async click(cmd: CmdOf<"click">): Promise<ActionResult> {
     return this.runAction(cmd, cmd.tab, async (page) => {
-      const { locator, stable } = await this.resolveTarget(page, cmd.target);
+      const { locator, stable } = await this.resolveTarget(page, cmd.target, cmd.timeoutMs);
       step("click");
       await locator.click({ timeout: cmd.timeoutMs ?? BUDGET.DEFAULT_TIMEOUT_MS });
       return { text: `clicked "${stable}"`, stableTarget: stable };
@@ -1372,7 +1251,7 @@ export class Session {
   async fill(cmd: CmdOf<"fill">): Promise<ActionResult> {
     return this.runAction(cmd, cmd.tab, async (page) => {
       const timeout = cmd.timeoutMs ?? BUDGET.DEFAULT_TIMEOUT_MS;
-      const resolved = await this.resolveTarget(page, cmd.target);
+      const resolved = await this.resolveTarget(page, cmd.target, cmd.timeoutMs);
       const { stable } = resolved;
       const { locator, type } = await this.fillableField(page, resolved, timeout);
       step("fill");
@@ -1428,7 +1307,7 @@ export class Session {
 
   async select(cmd: CmdOf<"select">): Promise<ActionResult> {
     return this.runAction(cmd, cmd.tab, async (page) => {
-      const { locator, stable } = await this.resolveTarget(page, cmd.target);
+      const { locator, stable } = await this.resolveTarget(page, cmd.target, cmd.timeoutMs);
       const timeout = cmd.timeoutMs ?? BUDGET.DEFAULT_TIMEOUT_MS;
       step("read options");
       const kind = await locator.evaluate(selectKind, undefined, { timeout });
@@ -1504,6 +1383,7 @@ export class Session {
         const text = cmd.text;
         await page
           .getByText(text)
+          .filter({ visible: true })
           .first()
           .waitFor({ state: "visible", timeout })
           .catch(() => {
@@ -1590,7 +1470,7 @@ export class Session {
       async () => {
         let resolved: Resolved;
         try {
-          resolved = await this.resolveTarget(page, target);
+          resolved = await this.resolveTarget(page, target, 0);
         } catch (err) {
           if (isMiss(err)) return true;
           throw err;
@@ -1632,7 +1512,7 @@ export class Session {
 
     if (cmd.kind === "text") {
       try {
-        await page.getByText(cmd.value).first().waitFor({ state: "visible", timeout });
+        await page.getByText(cmd.value).filter({ visible: true }).first().waitFor({ state: "visible", timeout });
         return { pass: true, detail: `text "${cmd.value}" is visible` };
       } catch {
         return { pass: false, detail: `text not visible within ${timeout}ms` };
@@ -1640,8 +1520,8 @@ export class Session {
     }
 
     const locator = isSelectorish(cmd.value)
-      ? page.locator(cmd.value).first()
-      : page.getByText(cmd.value).first();
+      ? page.locator(cmd.value).filter({ visible: true }).first()
+      : page.getByText(cmd.value).filter({ visible: true }).first();
     const wantVisible = cmd.kind === "visible";
     try {
       await locator.waitFor({ state: wantVisible ? "visible" : "hidden", timeout });
@@ -1764,22 +1644,28 @@ export class Session {
       return { text: truncated ? raw.slice(0, BUDGET.TEXT_MAX_CHARS) : raw, truncated };
     };
     if (target) {
-      const { locator, stable } = await this.resolveTarget(page, target);
+      const { locator, stable } = await this.resolveTarget(page, target, timeout);
       step("read text");
       try {
         return await read(locator);
       } catch (err) {
-        // A selector (or testid, label) that matches nothing only shows here.
+        // resolve.ts passes selectors through: one that matches nothing only shows here.
         if (!/Timeout \d+ms exceeded/.test(errorMessage(err))) throw err;
         throw {
           code: "target_not_found",
           message: `no element matching "${stable}" within ${timeout} ms`,
-          nearMatches: await this.nearMatches(page, stable),
+          nearMatches: await nearMatches(page, stable).catch(() => []),
         };
       }
     }
     step("find main content");
-    const main = await this.firstPresent([page.locator("main"), page.locator('[role="main"]')]);
+    let main: Locator | null = null;
+    for (const candidate of [page.locator("main"), page.locator('[role="main"]')]) {
+      if ((await candidate.count().catch(() => 0)) > 0) {
+        main = candidate.first();
+        break;
+      }
+    }
     step("read text");
     if (main) {
       const text = await read(main);
@@ -1904,7 +1790,6 @@ export class Session {
   async back(cmd: CmdOf<"back">): Promise<ActionResult> {
     return this.runAction(cmd, cmd.tab, async (page) => {
       await page.goBack({ waitUntil: "domcontentloaded" });
-      this.refsFor(page).generation++;
       return { text: "went back" };
     }, this.settleCap(cmd.settle));
   }
@@ -1912,7 +1797,6 @@ export class Session {
   async reload(cmd: CmdOf<"reload">): Promise<ActionResult> {
     return this.runAction(cmd, cmd.tab, async (page) => {
       await page.reload({ waitUntil: "domcontentloaded" });
-      this.refsFor(page).generation++;
       return { text: "reloaded" };
     }, this.settleCap(cmd.settle));
   }
@@ -2196,12 +2080,11 @@ export class Session {
           title: info.title,
           active: info.active,
           metrics,
-          refs: this.refs.get(info.id)?.entries.size ?? 0,
+          refs: refCount(page),
         };
       }),
     );
-    let refEntries = 0;
-    for (const r of this.refs.values()) refEntries += r.entries.size;
+    const refEntries = pages.reduce((sum, page) => sum + refCount(page), 0);
     return {
       pages: out,
       internals: {
@@ -2209,7 +2092,7 @@ export class Session {
         actionLogChars: this.actions.chars,
         actionLogDropped: this.actions.dropped,
         actionLogCap: ACTION_LOG_CAP,
-        refPages: this.refs.size,
+        refPages: pages.filter((page) => refCount(page) > 0).length,
         refEntries,
         consolePushed: this.buffers.console.length,
         netPushed: this.buffers.net.length,
@@ -2309,8 +2192,5 @@ export class Session {
         .catch(() => undefined);
     }
     this.active = page;
-    // Refs registered against the old context cannot resolve in the new one,
-    // and its page ids are gone with it.
-    this.refs.clear();
   }
 }
