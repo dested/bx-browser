@@ -81,8 +81,18 @@ are relative to that element's top-left, otherwise to the viewport)
 
 Flows and automation
   run <flow.ts> [--record]         replay a typed flow file (zero model tokens)
-  record start <slug>              start recording the session
-  record stop                      stop and package it under recordings/<slug>/
+  record start [slug]              record one tab, no relaunch (default slug rec-<date-time>)
+         [--tab <id> | --follow]   --tab: that tab, not the active one; --follow: move
+         [--ring <secs>]           with the active tab; --ring: keep only the newest secs in
+         [--fps 30|60]             memory and write nothing until save/stop
+  record mark "<text>"             a chapter marker in the transcript and report
+  record stop [--distill] [--mp4]  package under recordings/<slug>/: video.webm, transcript.txt,
+                                   recording.json; report.md distills in the background
+                                   (--distill waits for it; --mp4 needs ffmpeg with libx264)
+  record save --last <secs>        ring mode: package the newest secs while recording goes on
+              [slug] [--mp4]
+  record status                    what is recording, and which reports are still distilling
+  record distill <dir>             re-run distill on a package (writes report.md)
   agent "<instruction>"            let a cheap model drive; prints a short report
                                    [--model haiku|sonnet|opus] [--opus]
                                    [--save <name>] [--max-turns <n>] [--verbose]

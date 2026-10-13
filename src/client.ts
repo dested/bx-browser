@@ -281,7 +281,12 @@ function neverConnected(err: unknown): boolean {
 async function post<T>(run: RunFile, c: Cmd, deadlineMs: number): Promise<CmdResult<T>> {
   // drive and recordings carry their own long waits and the daemon sizes their
   // deadline itself, so the client only bounds the commands it set one for.
-  const longRunning = c.cmd === "drive" || c.cmd === "recordStart" || c.cmd === "recordStop";
+  const longRunning =
+    c.cmd === "drive" ||
+    c.cmd === "recordStart" ||
+    c.cmd === "recordStop" ||
+    c.cmd === "recordSave" ||
+    c.cmd === "recordDistill";
   const res = await fetch(`http://127.0.0.1:${run.port}/cmd`, {
     method: "POST",
     headers: {

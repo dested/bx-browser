@@ -19,12 +19,14 @@ using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
+using System.Threading;
 using System.Text;
 using System.Text.Json;
 
 namespace Bx;
 
-internal static class Program
+internal static partial class Program
 {
     // Keep in step with LOCAL_VERBS in src/argv/parse.ts.
     private static readonly HashSet<string> LocalVerbs = new(StringComparer.Ordinal)
@@ -281,30 +283,95 @@ internal static class Program
         return 3;
     }
 
-    /// <summary>The Bun CLI, same arguments, inherited stdio; its exit code is ours.</summary>
+    [LibraryImport("kernel32.dll")]
+    private static partial IntPtr GetConsoleWindow();
+
+    /// <summary>
+    /// The Bun CLI, same arguments; its exit code is ours. Run from a terminal
+    /// (bx.exe has a console window) the child shares that console: colors,
+    /// Ctrl+C and stdin behave as if bun had been run directly. Spawned hidden
+    /// (no console window, e.g. a script's windowsHide), the child gets
+    /// CREATE_NO_WINDOW and piped stdio that bx.exe relays, so it can never
+    /// open a console window of its own.
+    /// </summary>
     private static int RunBun(string[] args)
     {
         var home = Environment.GetEnvironmentVariable("BX_HOME");
         var root = string.IsNullOrEmpty(home)
             ? Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, ".."))
             : home;
-        var start = new ProcessStartInfo("bun") { UseShellExecute = false };
+        var hidden = GetConsoleWindow() == IntPtr.Zero;
+        var start = new ProcessStartInfo("bun")
+        {
+            UseShellExecute = false,
+            CreateNoWindow = hidden,
+            RedirectStandardInput = hidden,
+            RedirectStandardOutput = hidden,
+            RedirectStandardError = hidden,
+        };
         start.ArgumentList.Add(Path.Combine(root, "src", "cli.ts"));
         foreach (var arg in args) start.ArgumentList.Add(arg);
 
-        // Ctrl+C reaches the child through the shared console; stay alive to
+        // With a shared console, Ctrl+C reaches the child too; stay alive to
         // collect its exit code.
-        Console.CancelKeyPress += (_, e) => e.Cancel = true;
+        if (!hidden) Console.CancelKeyPress += (_, e) => e.Cancel = true;
         try
         {
             using var child = Process.Start(start);
             if (child is null) return Fail("bx.exe: bun did not start");
+            if (!hidden)
+            {
+                child.WaitForExit();
+                return child.ExitCode;
+            }
+
+            var stdout = Relay(child.StandardOutput.BaseStream, Console.OpenStandardOutput(), closeTarget: false);
+            var stderr = Relay(child.StandardError.BaseStream, Console.OpenStandardError(), closeTarget: false);
+            // stdin may stay open forever (a parent that never closes its end):
+            // relay it in the background and never wait for it.
+            Relay(Console.OpenStandardInput(), child.StandardInput.BaseStream, closeTarget: true);
             child.WaitForExit();
+            stdout.Join();
+            stderr.Join();
             return child.ExitCode;
         }
         catch (Win32Exception e)
         {
             return Fail($"bx.exe: can't start bun ({e.Message}); is it on PATH?");
         }
+    }
+
+    private static Thread Relay(Stream from, Stream to, bool closeTarget)
+    {
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                var buf = new byte[16384];
+                int n;
+                while ((n = from.Read(buf, 0, buf.Length)) > 0)
+                {
+                    to.Write(buf, 0, n);
+                    to.Flush();
+                }
+            }
+            catch (IOException)
+            {
+                // The other end went away (child exited, reader closed): stop relaying.
+            }
+            catch (ObjectDisposedException)
+            {
+                // Same, after the child's streams were disposed.
+            }
+            finally
+            {
+                if (closeTarget) to.Dispose();
+            }
+        })
+        {
+            IsBackground = true,
+        };
+        thread.Start();
+        return thread;
     }
 }

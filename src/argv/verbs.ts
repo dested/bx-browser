@@ -19,6 +19,7 @@ import type {
   NetEntry,
   OpenResult,
   RecordStartResult,
+  RecordStatusResult,
   RecordStopResult,
   SnapResult,
   StatusResult,
@@ -252,6 +253,62 @@ async function jsSource(io: VerbIO, g: Globals, args: string[]): Promise<string>
     }
   }
   return args.join(" ").trim();
+}
+
+/** yyyymmdd-hhmmss in local time: default recording slugs. */
+function recordStamp(d = new Date()): string {
+  const p = (n: number): string => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+const RECORD_SLUG = /^[a-z0-9-]+$/;
+
+function recordSlug(raw: string | undefined, fallback: string): string {
+  const slug = raw ?? fallback;
+  if (!RECORD_SLUG.test(slug)) throw new CliError(2, `slug must be lowercase letters, digits and dashes: "${slug}"`);
+  return slug;
+}
+
+function intOption(args: string[], name: string, min: number, max: number): number | undefined {
+  const raw = takeOption(args, name);
+  if (raw === undefined) return undefined;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < min || n > max) {
+    throw new CliError(2, `${name} must be a whole number from ${min} to ${max}`);
+  }
+  return n;
+}
+
+/** The package lines shared by record stop, save and distill. */
+function renderPackage(head: string, d: RecordStopResult): string {
+  const lines = [
+    `${head} — ${d.actionCount} action${d.actionCount === 1 ? "" : "s"}, ${(d.durationMs / 1000).toFixed(1)}s, ${d.frames} frame${d.frames === 1 ? "" : "s"}`,
+    `  package  ${d.dir}`,
+    `  video    ${d.videoPath}`,
+  ];
+  if (d.mp4Path !== undefined) lines.push(`  mp4      ${d.mp4Path}`);
+  lines.push(
+    d.distill === "done"
+      ? `  report   ${d.reportPath}`
+      : d.distill === "running"
+        ? "  report   distilling in the background — bx record status"
+        : `  report   distill failed — see ${path.join(d.dir, "distill.log")}`,
+  );
+  return lines.join("\n");
+}
+
+function renderRecordStatus(d: RecordStatusResult): string {
+  const lines: string[] = [];
+  if (!d.recording) {
+    lines.push("not recording");
+  } else {
+    const parts = [`tab ${d.tab ?? "?"}${d.follow === true ? " (follow)" : ""}`];
+    if (d.ring !== undefined) parts.push(`ring ${d.ring}s, ${((d.bufferedBytes ?? 0) / 1_048_576).toFixed(1)} MB held`);
+    parts.push(`${((d.elapsedMs ?? 0) / 1000).toFixed(1)}s`, `${d.frames ?? 0} frames`, `${d.marks ?? 0} marks`);
+    lines.push(`● recording "${d.slug ?? ""}" — ${parts.join(", ")}`);
+  }
+  for (const dir of d.distilling) lines.push(`  distilling ${dir}`);
+  return lines.join("\n");
 }
 
 /**
@@ -602,28 +659,88 @@ export async function runVerb(g: Globals, command: string, args: string[], io: V
     case "record": {
       const sub = args[0];
       if (sub === "start") {
-        const slug = args[1];
-        if (slug === undefined) throw new CliError(2, "usage: bx record start <slug>");
-        if (!/^[a-z0-9-]+$/.test(slug)) {
-          throw new CliError(2, `slug must be lowercase letters, digits and dashes: "${slug}"`);
-        }
-        return send<RecordStartResult>(io, g,
-          { cmd: "recordStart", slug },
-          (d) => `● recording "${d.slug}" — bx record stop to package it`,
+        const follow = takeFlag(args, "--follow");
+        const tab = intOption(args, "--tab", 1, Number.MAX_SAFE_INTEGER);
+        const ring = intOption(args, "--ring", 5, 600);
+        const fpsRaw = takeOption(args, "--fps");
+        if (fpsRaw !== undefined && fpsRaw !== "30" && fpsRaw !== "60") throw new CliError(2, "--fps must be 30 or 60");
+        const fps = fpsRaw === "60" ? 60 : fpsRaw === "30" ? 30 : undefined;
+        if (follow && tab !== undefined) throw new CliError(2, "bx record start: pass --tab or --follow, not both");
+        const slug = recordSlug(args[1], `rec-${recordStamp()}`);
+        return send<RecordStartResult>(
+          io,
+          g,
+          { cmd: "recordStart", slug, tab, follow: follow || undefined, ring, fps },
+          (d) =>
+            `● recording "${d.slug}" — tab ${d.tab}${follow ? " (follow)" : ""}` +
+            `${d.ring === undefined ? "" : `, last ${d.ring}s kept in memory`}, first frame in ${d.firstFrameMs} ms\n` +
+            (d.ring === undefined
+              ? '  bx record mark "<text>" · bx record stop'
+              : '  bx record save --last <secs> · bx record mark "<text>" · bx record stop'),
+        );
+      }
+      if (sub === "mark") {
+        const text = args.slice(1).join(" ");
+        if (text === "") throw new CliError(2, 'usage: bx record mark "<text>"');
+        return send<RecordStatusResult>(
+          io,
+          g,
+          { cmd: "recordMark", text },
+          (d) => `● mark ${d.marks ?? 0} at ${((d.elapsedMs ?? 0) / 1000).toFixed(1)}s: ${text}`,
         );
       }
       if (sub === "stop") {
+        const distill = takeFlag(args, "--distill");
+        const mp4 = takeFlag(args, "--mp4");
         const status = await io.send<StatusResult>({ cmd: "status" }, g);
         if (!status.ok) return emit(io, g, status, renderStatus);
         const slug = status.data.recording;
         if (slug === null) throw new CliError(1, "not recording");
         const outDir = path.resolve(io.cwd, "recordings", slug);
-        return send<RecordStopResult>(io, g,
-          { cmd: "recordStop", outDir },
-          (d) => `✓ recorded ${d.actionCount} actions\n  package  ${d.dir}\n  report   ${d.reportPath}`,
+        return send<RecordStopResult>(
+          io,
+          g,
+          { cmd: "recordStop", outDir, distill: distill || undefined, mp4: mp4 || undefined },
+          (d) => renderPackage("✓ recorded", d),
         );
       }
-      throw new CliError(2, "usage: bx record start <slug> | bx record stop");
+      if (sub === "save") {
+        const mp4 = takeFlag(args, "--mp4");
+        const lastSecs = intOption(args, "--last", 1, 600);
+        if (lastSecs === undefined) throw new CliError(2, "usage: bx record save --last <secs> [slug] [--mp4]");
+        const status = await io.send<StatusResult>({ cmd: "status" }, g);
+        if (!status.ok) return emit(io, g, status, renderStatus);
+        const recording = status.data.recording;
+        if (recording === null) throw new CliError(1, "not recording");
+        const slug = recordSlug(args[1], `${recording}-${recordStamp()}`);
+        const outDir = path.resolve(io.cwd, "recordings", slug);
+        return send<RecordStopResult>(
+          io,
+          g,
+          { cmd: "recordSave", lastSecs, outDir, mp4: mp4 || undefined },
+          (d) => renderPackage(`✓ saved the last ${lastSecs}s`, d),
+        );
+      }
+      if (sub === "status") {
+        return send<RecordStatusResult>(io, g, { cmd: "recordStatus" }, renderRecordStatus);
+      }
+      if (sub === "distill") {
+        const dir = args[1];
+        if (dir === undefined) throw new CliError(2, "usage: bx record distill <dir>");
+        const res = await io.send<RecordStopResult>({ cmd: "recordDistill", dir: path.resolve(io.cwd, dir) }, g);
+        const code = emit(io, g, res, (d) =>
+          renderPackage(d.distill === "done" ? "✓ distilled" : "✗ distill failed", d),
+        );
+        if (code !== 0) return code;
+        // The package is still there, but the one thing asked for didn't happen.
+        return res.ok && res.data.distill === "failed" ? 1 : 0;
+      }
+      throw new CliError(
+        2,
+        "usage: bx record start [slug] [--tab <id> | --follow] [--ring <secs>] [--fps 30|60]\n" +
+          '       bx record mark "<text>" | bx record stop [--distill] [--mp4]\n' +
+          "       bx record save --last <secs> [slug] [--mp4] | bx record status | bx record distill <dir>",
+      );
     }
 
     // The CLI answers "no daemon running" itself before it gets here; inside
