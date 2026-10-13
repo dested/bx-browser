@@ -2,7 +2,7 @@
 // dist/bx.exe. Needs the .NET 10 SDK and the C++ build tools NativeAOT links
 // with. Nothing here touches PATH or the global bx link.
 //
-//   bun scripts/build-frontdoor.ts
+//   bun scripts/build-frontdoor.ts [--rebuild]
 
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -23,12 +23,42 @@ if (process.platform !== "win32") {
 // linker's path and the link fails.
 const programFilesX86 = process.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)";
 const vswhereDir = path.join(programFilesX86, "Microsoft Visual Studio", "Installer");
-const env = { ...process.env, PATH: `${process.env.PATH ?? ""}${path.delimiter}${vswhereDir}` };
+// No build servers and no node reuse: MSBuild nodes and VBCSCompiler left
+// running detached have no console, so the link step they run later (cmd for
+// vcvarsall, vswhere, link.exe) would each open a visible console window.
+const env = {
+  ...process.env,
+  PATH: `${process.env.PATH ?? ""}${path.delimiter}${vswhereDir}`,
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1",
+  MSBUILDDISABLENODEREUSE: "1",
+};
+
+// --rebuild forces the compile, ILCompiler and link steps even when nothing
+// changed, by removing their outputs (single files, never a folder).
+if (process.argv.includes("--rebuild")) {
+  const obj = path.join(root, "dotnet", "bx", "obj", "Release", "net10.0", "win-x64");
+  for (const file of ["bx.dll", "bx.csproj.CoreCompileInputs.cache", path.join("native", "bx.obj")]) {
+    fs.rmSync(path.join(obj, file), { force: true });
+  }
+}
 
 const started = performance.now();
 const result = spawnSync(
   "dotnet",
-  ["publish", project, "-c", "Release", "-r", "win-x64", "-o", publishDir, "--nologo"],
+  [
+    "publish",
+    project,
+    "-c",
+    "Release",
+    "-r",
+    "win-x64",
+    "-o",
+    publishDir,
+    "--nologo",
+    "-nodeReuse:false",
+    "-p:UseSharedCompilation=false",
+    "--disable-build-servers",
+  ],
   { stdio: "inherit", windowsHide: true, env },
 );
 if (result.error !== undefined) {
